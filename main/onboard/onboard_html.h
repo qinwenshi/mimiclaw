@@ -9,6 +9,7 @@ static const char ONBOARD_HTML[] =
 "*{box-sizing:border-box;margin:0;padding:0}"
 "body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#333;padding:16px;max-width:480px;margin:0 auto}"
 "h1{text-align:center;margin:16px 0;font-size:1.4em;color:#1a73e8}"
+".note{font-size:.82em;color:#666;line-height:1.5;background:#eef4ff;border:1px solid #d5e2ff;border-radius:10px;padding:10px 12px;margin:0 0 12px}"
 ".card{background:#fff;border-radius:12px;margin:12px 0;box-shadow:0 1px 3px rgba(0,0,0,.12);overflow:hidden}"
 ".card-hdr{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;cursor:pointer;user-select:none;font-weight:600;font-size:.95em}"
 ".card-hdr::after{content:'\\25BC';font-size:.7em;transition:transform .2s}"
@@ -34,6 +35,7 @@ static const char ONBOARD_HTML[] =
 "<p style='text-align:center;color:#666;font-size:.9em;margin-bottom:12px'>"
 "This local portal remains available at 192.168.4.1 for later updates."
 "</p>"
+"<div class='note'>Sensitive fields are never returned by this page. Leave a secret field blank to keep the current value.</div>"
 
 /* WiFi section (expanded by default) */
 "<div class='card' id='sec-wifi'>"
@@ -69,7 +71,7 @@ static const char ONBOARD_HTML[] =
 "<div class='card-hdr' onclick='toggle(this)'>Telegram Bot</div>"
 "<div class='card-body'>"
 "<label>Bot Token</label>"
-"<input id='tg_token' placeholder='123456:ABC-DEF...'>"
+"<input id='tg_token' type='password' placeholder='123456:ABC-DEF...'>"
 "</div></div>"
 
 /* Feishu section */
@@ -115,11 +117,20 @@ static const char ONBOARD_HTML[] =
 "function toggle(el){"
 "el.parentElement.classList.toggle('collapsed')}"
 
+"function secretPlaceholder(id, configured){"
+"var placeholders={password:'WiFi password',api_key:'sk-...',tg_token:'123456:ABC-DEF...',feishu_app_secret:'App Secret',search_key:'BSA...',tavily_key:'tvly-...'};"
+"var base=placeholders[id]||'';"
+"return configured?'Configured. Leave blank to keep current value':base;}"
+
 "function loadConfig(){"
 "fetch('/config').then(r=>r.json()).then(cfg=>{"
 "Object.keys(cfg).forEach(k=>{"
 "var el=document.getElementById(k);"
 "if(el && cfg[k] !== undefined && cfg[k] !== null){el.value=cfg[k]}"
+"})"
+"['password','api_key','tg_token','feishu_app_secret','search_key','tavily_key'].forEach(id=>{"
+"var el=document.getElementById(id);"
+"if(el){el.value='';el.placeholder=secretPlaceholder(id, !!cfg[id+'_configured'])}"
 "})"
 "}).catch(()=>{})}"
 

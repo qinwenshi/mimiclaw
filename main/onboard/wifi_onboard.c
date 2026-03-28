@@ -47,6 +47,32 @@ static void json_add_effective_config(cJSON *root, const char *json_key,
     cJSON_AddStringToObject(root, json_key, value);
 }
 
+static void json_add_secret_config_state(cJSON *root, const char *json_key,
+                                         const char *ns, const char *nvs_key,
+                                         const char *build_val)
+{
+    char value[256] = {0};
+    char state_key[48];
+    bool configured = false;
+    nvs_handle_t nvs;
+
+    if (nvs_open(ns, NVS_READONLY, &nvs) == ESP_OK) {
+        size_t len = sizeof(value);
+        if (nvs_get_str(nvs, nvs_key, value, &len) == ESP_OK && value[0] != '\0') {
+            configured = true;
+        }
+        nvs_close(nvs);
+    }
+
+    if (!configured && build_val && build_val[0] != '\0') {
+        configured = true;
+    }
+
+    cJSON_AddStringToObject(root, json_key, "");
+    snprintf(state_key, sizeof(state_key), "%s_configured", json_key);
+    cJSON_AddBoolToObject(root, state_key, configured);
+}
+
 static void json_add_effective_config_u16(cJSON *root, const char *json_key,
                                           const char *ns, const char *nvs_key,
                                           const char *build_val)
@@ -217,19 +243,19 @@ static esp_err_t http_get_config(httpd_req_t *req)
     }
 
     json_add_effective_config(root, "ssid", MIMI_NVS_WIFI, MIMI_NVS_KEY_SSID, MIMI_SECRET_WIFI_SSID);
-    json_add_effective_config(root, "password", MIMI_NVS_WIFI, MIMI_NVS_KEY_PASS, MIMI_SECRET_WIFI_PASS);
-    json_add_effective_config(root, "api_key", MIMI_NVS_LLM, MIMI_NVS_KEY_API_KEY, MIMI_SECRET_API_KEY);
+    json_add_secret_config_state(root, "password", MIMI_NVS_WIFI, MIMI_NVS_KEY_PASS, MIMI_SECRET_WIFI_PASS);
+    json_add_secret_config_state(root, "api_key", MIMI_NVS_LLM, MIMI_NVS_KEY_API_KEY, MIMI_SECRET_API_KEY);
     json_add_effective_config(root, "model", MIMI_NVS_LLM, MIMI_NVS_KEY_MODEL, MIMI_SECRET_MODEL);
     json_add_effective_config(root, "provider", MIMI_NVS_LLM, MIMI_NVS_KEY_PROVIDER, MIMI_SECRET_MODEL_PROVIDER);
     json_add_effective_config(root, "openai_url", MIMI_NVS_LLM, MIMI_NVS_KEY_OPENAI_API_URL, MIMI_SECRET_OPENAI_API_URL);
-    json_add_effective_config(root, "tg_token", MIMI_NVS_TG, MIMI_NVS_KEY_TG_TOKEN, MIMI_SECRET_TG_TOKEN);
+    json_add_secret_config_state(root, "tg_token", MIMI_NVS_TG, MIMI_NVS_KEY_TG_TOKEN, MIMI_SECRET_TG_TOKEN);
     json_add_effective_config(root, "feishu_app_id", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_APP_ID, MIMI_SECRET_FEISHU_APP_ID);
-    json_add_effective_config(root, "feishu_app_secret", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_APP_SECRET, MIMI_SECRET_FEISHU_APP_SECRET);
+    json_add_secret_config_state(root, "feishu_app_secret", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_APP_SECRET, MIMI_SECRET_FEISHU_APP_SECRET);
     json_add_effective_config(root, "proxy_host", MIMI_NVS_PROXY, MIMI_NVS_KEY_PROXY_HOST, MIMI_SECRET_PROXY_HOST);
     json_add_effective_config_u16(root, "proxy_port", MIMI_NVS_PROXY, MIMI_NVS_KEY_PROXY_PORT, MIMI_SECRET_PROXY_PORT);
     json_add_effective_config(root, "proxy_type", MIMI_NVS_PROXY, MIMI_NVS_KEY_PROXY_TYPE, MIMI_SECRET_PROXY_TYPE);
-    json_add_effective_config(root, "search_key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY, MIMI_SECRET_SEARCH_KEY);
-    json_add_effective_config(root, "tavily_key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_TAVILY_KEY, MIMI_SECRET_TAVILY_KEY);
+    json_add_secret_config_state(root, "search_key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY, MIMI_SECRET_SEARCH_KEY);
+    json_add_secret_config_state(root, "tavily_key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_TAVILY_KEY, MIMI_SECRET_TAVILY_KEY);
 
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -271,6 +297,29 @@ static void nvs_sync_field(cJSON *root, const char *json_key,
             ESP_LOGI(TAG, "Saved %s/%s", ns, nvs_key);
         }
         nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
+
+/*
+ * Sync one sensitive JSON string field into NVS.
+ * - missing field: leave current NVS value unchanged
+ * - empty string: keep current NVS value unchanged
+ * - non-empty string: save/update current NVS value
+ */
+static void nvs_sync_secret_field(cJSON *root, const char *json_key,
+                                  const char *ns, const char *nvs_key)
+{
+    cJSON *item = cJSON_GetObjectItem(root, json_key);
+    if (!item || !cJSON_IsString(item) || item->valuestring[0] == '\0') {
+        return;
+    }
+
+    nvs_handle_t nvs;
+    if (nvs_open(ns, NVS_READWRITE, &nvs) == ESP_OK) {
+        ESP_ERROR_CHECK(nvs_set_str(nvs, nvs_key, item->valuestring));
+        ESP_ERROR_CHECK(nvs_commit(nvs));
+        ESP_LOGI(TAG, "Saved %s/%s", ns, nvs_key);
         nvs_close(nvs);
     }
 }
@@ -348,10 +397,10 @@ static esp_err_t http_post_save(httpd_req_t *req)
 
     /* WiFi (required) */
     nvs_sync_field(root, "ssid",     MIMI_NVS_WIFI,   MIMI_NVS_KEY_SSID);
-    nvs_sync_field(root, "password", MIMI_NVS_WIFI,   MIMI_NVS_KEY_PASS);
+    nvs_sync_secret_field(root, "password", MIMI_NVS_WIFI, MIMI_NVS_KEY_PASS);
 
     /* LLM */
-    nvs_sync_field(root, "api_key",  MIMI_NVS_LLM,    MIMI_NVS_KEY_API_KEY);
+    nvs_sync_secret_field(root, "api_key", MIMI_NVS_LLM, MIMI_NVS_KEY_API_KEY);
     nvs_sync_field(root, "model",    MIMI_NVS_LLM,    MIMI_NVS_KEY_MODEL);
     nvs_sync_field(root, "provider", MIMI_NVS_LLM,    MIMI_NVS_KEY_PROVIDER);
     esp_err_t openai_url_err = sync_openai_url_field(root);
@@ -362,11 +411,11 @@ static esp_err_t http_post_save(httpd_req_t *req)
     }
 
     /* Telegram */
-    nvs_sync_field(root, "tg_token", MIMI_NVS_TG,     MIMI_NVS_KEY_TG_TOKEN);
+    nvs_sync_secret_field(root, "tg_token", MIMI_NVS_TG, MIMI_NVS_KEY_TG_TOKEN);
 
     /* Feishu */
     nvs_sync_field(root, "feishu_app_id",     MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_APP_ID);
-    nvs_sync_field(root, "feishu_app_secret", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_APP_SECRET);
+    nvs_sync_secret_field(root, "feishu_app_secret", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_APP_SECRET);
 
     /* Proxy */
     nvs_sync_field(root, "proxy_host", MIMI_NVS_PROXY, MIMI_NVS_KEY_PROXY_HOST);
@@ -374,8 +423,8 @@ static esp_err_t http_post_save(httpd_req_t *req)
     nvs_sync_field(root, "proxy_type", MIMI_NVS_PROXY, MIMI_NVS_KEY_PROXY_TYPE);
 
     /* Search */
-    nvs_sync_field(root, "search_key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY);
-    nvs_sync_field(root, "tavily_key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_TAVILY_KEY);
+    nvs_sync_secret_field(root, "search_key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY);
+    nvs_sync_secret_field(root, "tavily_key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_TAVILY_KEY);
 
     cJSON_Delete(root);
 
