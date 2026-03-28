@@ -20,6 +20,14 @@
 #include "led_ws2812.h"
 #include "wifi/wifi_manager.h"
 
+#define U8G2_USE_LARGE_FONTS
+#ifndef U8G2_FONT_SECTION
+#define U8G2_FONT_SECTION(name)
+#endif
+#include "fonts/u8g2_font_unifont_t_chinese.h"
+#undef U8G2_FONT_SECTION
+#undef U8G2_USE_LARGE_FONTS
+
 static const char *TAG = "board_ui";
 
 #define UI_FRAME_MS                 250
@@ -27,17 +35,23 @@ static const char *TAG = "board_ui";
 #define UI_RENDER_STACK             6144
 #define UI_RENDER_PRIO              4
 #define UI_BUTTON_PRIO              5
+#define UI_CONTENT_LEN              512
 #define UI_DETAIL_LEN               96
 #define UI_TITLE_LEN                24
 #define UI_LINE_LEN                 80
+#define UI_CONTENT_LINE_GAP         2
+#define UI_CONTENT_SCROLL_STEP_MS   70
+#define UI_CONTENT_SCROLL_PAUSE_PX  20
+#define UI_U8G2_FONT_DATA_OFFSET    23
 
 typedef struct {
     board_ui_phase_t phase;
     char title[UI_TITLE_LEN];
     char detail[UI_DETAIL_LEN];
     char last_source[16];
-    char last_rx[UI_LINE_LEN];
-    char last_tx[UI_LINE_LEN];
+    char last_tx_channel[16];
+    char last_rx[UI_CONTENT_LEN];
+    char last_tx[UI_CONTENT_LEN];
     uint32_t inbound_count;
     uint32_t outbound_count;
     uint8_t page;
@@ -61,14 +75,65 @@ static board_ui_state_t s_ui = {
     .title = "BOOT",
     .detail = "BRINGING UP BOARD",
     .last_source = "SYSTEM",
-    .last_rx = "WAITING",
-    .last_tx = "WAITING",
+    .last_tx_channel = "SYSTEM",
+    .last_rx = "Waiting for message",
+    .last_tx = "Waiting for reply",
     .brightness_index = 3,
 };
+
+typedef struct {
+    const uint8_t *data;
+    size_t data_len;
+    uint8_t bits_per_0;
+    uint8_t bits_per_1;
+    uint8_t bits_per_char_width;
+    uint8_t bits_per_char_height;
+    uint8_t bits_per_char_x;
+    uint8_t bits_per_char_y;
+    uint8_t bits_per_delta_x;
+    uint8_t max_char_width;
+    uint8_t max_char_height;
+    uint16_t start_pos_upper_a;
+    uint16_t start_pos_lower_a;
+    uint16_t start_pos_unicode;
+} ui_u8g2_font_t;
+
+typedef struct {
+    const uint8_t *glyph_data;
+    uint8_t char_width;
+    uint8_t char_height;
+    int8_t char_x;
+    int8_t char_y;
+    int8_t delta_x;
+} ui_u8g2_glyph_t;
+
+typedef struct {
+    const char *start;
+    const char *end;
+    int width;
+} ui_utf8_span_t;
+
+typedef struct {
+    const ui_u8g2_font_t *font;
+    const uint8_t *decode_ptr;
+    uint8_t decode_bit_pos;
+    uint8_t char_width;
+    uint8_t char_height;
+    int16_t target_x;
+    int16_t target_y;
+    int16_t clip_x;
+    int16_t clip_y;
+    int16_t clip_w;
+    int16_t clip_h;
+    uint8_t dx;
+    uint8_t dy;
+    uint16_t color;
+} ui_u8g2_decoder_t;
 
 static const uint8_t k_brightness_levels[] = {48, 112, 180, 255};
 static uint16_t *s_framebuffer;
 static bool s_ready;
+static ui_u8g2_font_t s_content_font;
 
 static adc_oneshot_unit_handle_t s_adc1;
 static adc_oneshot_unit_handle_t s_adc2;
@@ -330,67 +395,6 @@ static void ui_normalize_text(char *dst, size_t dst_len, const char *src)
     dst[j] = '\0';
 }
 
-static size_t ui_copy_wrapped_line(char *dst, size_t dst_len, const char *src, size_t start,
-                                   int max_chars, bool ellipsis)
-{
-    size_t len = strlen(src);
-    size_t end;
-    size_t last_space = SIZE_MAX;
-    size_t out_len = 0;
-
-    while (start < len && src[start] == ' ') {
-        start++;
-    }
-    if (start >= len || max_chars <= 0 || dst_len == 0) {
-        dst[0] = '\0';
-        return len;
-    }
-
-    end = start;
-    while (end < len && (int)(end - start) < max_chars) {
-        if (src[end] == ' ') {
-            last_space = end;
-        }
-        end++;
-    }
-
-    if (end < len && !ellipsis && last_space != SIZE_MAX && last_space > start) {
-        end = last_space;
-    }
-
-    while (start < end && src[start] == ' ') {
-        start++;
-    }
-    while (end > start && src[end - 1] == ' ') {
-        end--;
-    }
-
-    out_len = end - start;
-    if (out_len >= dst_len) {
-        out_len = dst_len - 1;
-    }
-    memcpy(dst, src + start, out_len);
-    dst[out_len] = '\0';
-
-    if (ellipsis && end < len && max_chars >= 3) {
-        size_t clip_len = strlen(dst);
-        while (clip_len > 0 && dst[clip_len - 1] == ' ') {
-            clip_len--;
-        }
-        if (clip_len > (size_t)(max_chars - 3)) {
-            clip_len = (size_t)(max_chars - 3);
-        }
-        dst[clip_len] = '\0';
-        strncat(dst, "...", dst_len - strlen(dst) - 1);
-        return len;
-    }
-
-    if (last_space != SIZE_MAX && last_space >= end) {
-        return last_space + 1;
-    }
-    return end;
-}
-
 static void fb_draw_text_clipped_ex(int x, int y, int scale, uint16_t color, uint16_t shadow_color,
                                     int max_chars, const char *text)
 {
@@ -444,27 +448,672 @@ static void fb_draw_text_centered_clipped_ex(int x, int y, int w, int scale, uin
     fb_draw_text_line(text_x, y, scale, color, shadow_color, line);
 }
 
-static void fb_draw_text_block_clipped_ex(int x, int y, int scale, uint16_t color,
-                                          uint16_t shadow_color, int max_chars, int max_lines,
-                                          const char *text)
+static void ui_content_font_init(void)
 {
-    char normalized[UI_LINE_LEN];
-    char line[UI_LINE_LEN];
-    size_t pos = 0;
+    const uint8_t *font = u8g2_font_unifont_t_chinese;
 
-    if (max_chars <= 0 || max_lines <= 0) {
+    s_content_font.data = font;
+    s_content_font.data_len = sizeof(u8g2_font_unifont_t_chinese);
+    s_content_font.bits_per_0 = font[2];
+    s_content_font.bits_per_1 = font[3];
+    s_content_font.bits_per_char_width = font[4];
+    s_content_font.bits_per_char_height = font[5];
+    s_content_font.bits_per_char_x = font[6];
+    s_content_font.bits_per_char_y = font[7];
+    s_content_font.bits_per_delta_x = font[8];
+    s_content_font.max_char_width = font[9];
+    s_content_font.max_char_height = font[10];
+    s_content_font.start_pos_upper_a = (uint16_t)(((uint16_t)font[17] << 8) | font[18]);
+    s_content_font.start_pos_lower_a = (uint16_t)(((uint16_t)font[19] << 8) | font[20]);
+    s_content_font.start_pos_unicode = (uint16_t)(((uint16_t)font[21] << 8) | font[22]);
+}
+
+static bool ui_u8g2_can_read(const ui_u8g2_font_t *font, const uint8_t *ptr, size_t count)
+{
+    return ptr >= font->data && count <= font->data_len &&
+           (size_t)(ptr - font->data) <= font->data_len - count;
+}
+
+static bool ui_u8g2_get_word(const ui_u8g2_font_t *font, const uint8_t *ptr, uint8_t offset,
+                             uint16_t *out)
+{
+    if (!ui_u8g2_can_read(font, ptr + offset, 2)) {
+        return false;
+    }
+
+    *out = (uint16_t)(((uint16_t)ptr[offset] << 8) | ptr[offset + 1]);
+    return true;
+}
+
+static size_t ui_utf8_decode_next(const char *src, uint32_t *codepoint)
+{
+    const unsigned char *s = (const unsigned char *)src;
+    uint32_t cp;
+    size_t len;
+    uint32_t min_value;
+
+    if (!src || s[0] == '\0') {
+        if (codepoint) {
+            *codepoint = 0;
+        }
+        return 0;
+    }
+
+    if (s[0] < 0x80) {
+        if (codepoint) {
+            *codepoint = s[0];
+        }
+        return 1;
+    }
+
+    if ((s[0] & 0xE0u) == 0xC0u) {
+        cp = s[0] & 0x1Fu;
+        len = 2;
+        min_value = 0x80u;
+    } else if ((s[0] & 0xF0u) == 0xE0u) {
+        cp = s[0] & 0x0Fu;
+        len = 3;
+        min_value = 0x800u;
+    } else if ((s[0] & 0xF8u) == 0xF0u) {
+        cp = s[0] & 0x07u;
+        len = 4;
+        min_value = 0x10000u;
+    } else {
+        if (codepoint) {
+            *codepoint = '?';
+        }
+        return 1;
+    }
+
+    for (size_t i = 1; i < len; i++) {
+        if ((s[i] & 0xC0u) != 0x80u) {
+            if (codepoint) {
+                *codepoint = '?';
+            }
+            return 1;
+        }
+        cp = (cp << 6) | (uint32_t)(s[i] & 0x3Fu);
+    }
+
+    if (cp < min_value || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) {
+        if (codepoint) {
+            *codepoint = '?';
+        }
+        return 1;
+    }
+
+    if (codepoint) {
+        *codepoint = cp;
+    }
+    return len;
+}
+
+static void ui_copy_utf8_text(char *dst, size_t dst_len, const char *src, bool preserve_newlines)
+{
+    size_t out = 0;
+    bool last_space = false;
+    bool last_newline = false;
+
+    if (dst_len == 0) {
         return;
     }
 
-    ui_normalize_text(normalized, sizeof(normalized), text);
-    for (int line_idx = 0; line_idx < max_lines && normalized[pos] != '\0'; line_idx++) {
-        bool ellipsis = line_idx == max_lines - 1;
-        pos = ui_copy_wrapped_line(line, sizeof(line), normalized, pos, max_chars, ellipsis);
-        fb_draw_text_line(x, y + (line_idx * (scale * 9)), scale, color, shadow_color, line);
-        if (ellipsis) {
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+
+    while (*src != '\0' && out < dst_len - 1) {
+        uint32_t cp = 0;
+        size_t len;
+
+        if (*src == '\r') {
+            src++;
+            continue;
+        }
+
+        if (*src == '\n') {
+            src++;
+            if (!preserve_newlines) {
+                if (!last_space && out < dst_len - 1) {
+                    dst[out++] = ' ';
+                    last_space = true;
+                }
+                last_newline = false;
+                continue;
+            }
+            if (last_newline) {
+                continue;
+            }
+            dst[out++] = '\n';
+            last_space = false;
+            last_newline = true;
+            continue;
+        }
+
+        if (*src == '\t') {
+            src++;
+            if (!last_space && out < dst_len - 1) {
+                dst[out++] = ' ';
+                last_space = true;
+            }
+            last_newline = false;
+            continue;
+        }
+
+        len = ui_utf8_decode_next(src, &cp);
+        if (len == 0) {
             break;
         }
+
+        if (cp < 0x20u) {
+            src += len;
+            continue;
+        }
+
+        if (cp == ' ') {
+            if (!last_space && out < dst_len - 1) {
+                dst[out++] = ' ';
+                last_space = true;
+            }
+            last_newline = false;
+            src += len;
+            continue;
+        }
+
+        if (out + len >= dst_len) {
+            break;
+        }
+
+        memcpy(dst + out, src, len);
+        out += len;
+        last_space = false;
+        last_newline = false;
+        src += len;
     }
+
+    while (out > 0 && (dst[out - 1] == ' ' || dst[out - 1] == '\n')) {
+        out--;
+    }
+    dst[out] = '\0';
+}
+
+static uint8_t ui_u8g2_decode_get_unsigned_bits(ui_u8g2_decoder_t *state, uint8_t count);
+static int8_t ui_u8g2_decode_get_signed_bits(ui_u8g2_decoder_t *state, uint8_t count);
+
+static bool ui_u8g2_lookup_glyph(const ui_u8g2_font_t *font, uint32_t encoding, ui_u8g2_glyph_t *glyph)
+{
+    const uint8_t *font_ptr = font->data + UI_U8G2_FONT_DATA_OFFSET;
+    const uint8_t *glyph_data = NULL;
+
+    if (encoding <= 255u) {
+        if (encoding >= 'a') {
+            font_ptr += font->start_pos_lower_a;
+        } else if (encoding >= 'A') {
+            font_ptr += font->start_pos_upper_a;
+        }
+
+        for (;;) {
+            if (!ui_u8g2_can_read(font, font_ptr, 2)) {
+                break;
+            }
+            uint8_t step = font_ptr[1];
+            if (step == 0) {
+                break;
+            }
+            if (font_ptr[0] == encoding) {
+                glyph_data = font_ptr + 2;
+                break;
+            }
+            if (!ui_u8g2_can_read(font, font_ptr, step)) {
+                break;
+            }
+            font_ptr += step;
+        }
+    } else {
+        const uint8_t *unicode_lookup_table;
+        uint16_t current = 0;
+        bool lookup_ok = false;
+
+        font_ptr += font->start_pos_unicode;
+        unicode_lookup_table = font_ptr;
+        while (ui_u8g2_can_read(font, unicode_lookup_table, 4)) {
+            uint16_t jump = 0;
+
+            if (!ui_u8g2_get_word(font, unicode_lookup_table, 0, &jump) ||
+                !ui_u8g2_get_word(font, unicode_lookup_table, 2, &current)) {
+                break;
+            }
+            if (!ui_u8g2_can_read(font, font_ptr, jump)) {
+                break;
+            }
+            font_ptr += jump;
+            lookup_ok = true;
+            if (current >= encoding) {
+                break;
+            }
+            unicode_lookup_table += 4;
+        }
+
+        if (!lookup_ok || current < encoding) {
+            font_ptr = NULL;
+        }
+
+        while (font_ptr && ui_u8g2_can_read(font, font_ptr, 3)) {
+            uint16_t value = 0;
+            uint8_t step;
+
+            if (!ui_u8g2_get_word(font, font_ptr, 0, &value)) {
+                break;
+            }
+            if (value == 0) {
+                break;
+            }
+            if (value == encoding) {
+                glyph_data = font_ptr + 3;
+                break;
+            }
+            step = font_ptr[2];
+            if (step == 0 || !ui_u8g2_can_read(font, font_ptr, step)) {
+                break;
+            }
+            font_ptr += step;
+        }
+    }
+
+    if (!glyph_data && encoding != '?') {
+        return ui_u8g2_lookup_glyph(font, '?', glyph);
+    }
+    if (!glyph_data) {
+        return false;
+    }
+
+    ui_u8g2_decoder_t decoder = {
+        .font = font,
+        .decode_ptr = glyph_data,
+        .decode_bit_pos = 0,
+    };
+
+    glyph->glyph_data = glyph_data;
+    glyph->char_width = ui_u8g2_decode_get_unsigned_bits(&decoder, font->bits_per_char_width);
+    glyph->char_height = ui_u8g2_decode_get_unsigned_bits(&decoder, font->bits_per_char_height);
+    glyph->char_x = ui_u8g2_decode_get_signed_bits(&decoder, font->bits_per_char_x);
+    glyph->char_y = ui_u8g2_decode_get_signed_bits(&decoder, font->bits_per_char_y);
+    glyph->delta_x = ui_u8g2_decode_get_signed_bits(&decoder, font->bits_per_delta_x);
+    return true;
+}
+
+static int ui_u8g2_glyph_advance(const ui_u8g2_glyph_t *glyph)
+{
+    if (glyph->delta_x > 0) {
+        return glyph->delta_x;
+    }
+    if (glyph->char_width > 0) {
+        return glyph->char_width;
+    }
+    return 8;
+}
+
+static uint8_t ui_u8g2_decode_get_unsigned_bits(ui_u8g2_decoder_t *state, uint8_t count)
+{
+    uint32_t value = 0;
+
+    for (uint8_t bit = 0; bit < count; bit++) {
+        if (((*state->decode_ptr) >> state->decode_bit_pos) & 0x01u) {
+            value |= (1u << bit);
+        }
+        state->decode_bit_pos++;
+        if (state->decode_bit_pos == 8) {
+            state->decode_bit_pos = 0;
+            state->decode_ptr++;
+        }
+    }
+
+    return (uint8_t)value;
+}
+
+static int8_t ui_u8g2_decode_get_signed_bits(ui_u8g2_decoder_t *state, uint8_t count)
+{
+    int8_t value;
+    int8_t delta = 1;
+
+    if (count == 0) {
+        return 0;
+    }
+
+    value = (int8_t)ui_u8g2_decode_get_unsigned_bits(state, count);
+    delta <<= (count - 1);
+    value -= delta;
+    return value;
+}
+
+static void ui_u8g2_decode_len(ui_u8g2_decoder_t *state, uint8_t len, bool foreground)
+{
+    uint8_t cnt = len;
+    uint8_t lx = state->dx;
+    uint8_t ly = state->dy;
+
+    for (;;) {
+        uint8_t rem = (uint8_t)(state->char_width - lx);
+        uint8_t current = rem;
+
+        if (cnt < rem) {
+            current = cnt;
+        }
+
+        if (foreground) {
+            int draw_x = state->target_x + lx;
+            int draw_y = state->target_y + ly;
+            int clip_right = state->clip_x + state->clip_w;
+            int clip_bottom = state->clip_y + state->clip_h;
+            int draw_w = current;
+
+            if (draw_y >= state->clip_y && draw_y < clip_bottom) {
+                if (draw_x < state->clip_x) {
+                    draw_w -= state->clip_x - draw_x;
+                    draw_x = state->clip_x;
+                }
+                if (draw_x + draw_w > clip_right) {
+                    draw_w = clip_right - draw_x;
+                }
+                if (draw_w > 0) {
+                    fb_fill_rect(draw_x, draw_y, draw_w, 1, state->color);
+                }
+            }
+        }
+
+        if (cnt < rem) {
+            break;
+        }
+
+        cnt -= rem;
+        lx = 0;
+        ly++;
+    }
+
+    lx += cnt;
+    state->dx = lx;
+    state->dy = ly;
+}
+
+static void ui_u8g2_draw_glyph_clipped(int x, int baseline_y, const ui_u8g2_glyph_t *glyph,
+                                       uint16_t color, int clip_x, int clip_y, int clip_w,
+                                       int clip_h)
+{
+    ui_u8g2_decoder_t decoder = {
+        .font = &s_content_font,
+        .decode_ptr = glyph->glyph_data,
+        .decode_bit_pos = 0,
+        .clip_x = clip_x,
+        .clip_y = clip_y,
+        .clip_w = clip_w,
+        .clip_h = clip_h,
+        .color = color,
+    };
+
+    decoder.char_width = ui_u8g2_decode_get_unsigned_bits(&decoder, s_content_font.bits_per_char_width);
+    decoder.char_height = ui_u8g2_decode_get_unsigned_bits(&decoder, s_content_font.bits_per_char_height);
+    (void)ui_u8g2_decode_get_unsigned_bits(&decoder, s_content_font.bits_per_char_x);
+    (void)ui_u8g2_decode_get_unsigned_bits(&decoder, s_content_font.bits_per_char_y);
+    (void)ui_u8g2_decode_get_unsigned_bits(&decoder, s_content_font.bits_per_delta_x);
+    decoder.target_x = (int16_t)(x + glyph->char_x);
+    decoder.target_y = (int16_t)(baseline_y - (glyph->char_height + glyph->char_y));
+
+    while (decoder.dy < glyph->char_height) {
+        uint8_t zeros = ui_u8g2_decode_get_unsigned_bits(&decoder, s_content_font.bits_per_0);
+        uint8_t ones = ui_u8g2_decode_get_unsigned_bits(&decoder, s_content_font.bits_per_1);
+
+        do {
+            ui_u8g2_decode_len(&decoder, zeros, false);
+            ui_u8g2_decode_len(&decoder, ones, true);
+        } while (ui_u8g2_decode_get_unsigned_bits(&decoder, 1) != 0);
+    }
+}
+
+static int ui_u8g2_measure_codepoint(uint32_t codepoint)
+{
+    ui_u8g2_glyph_t glyph;
+
+    if (!ui_u8g2_lookup_glyph(&s_content_font, codepoint, &glyph)) {
+        return 8;
+    }
+    return ui_u8g2_glyph_advance(&glyph);
+}
+
+static void ui_u8g2_draw_span_clipped(int x, int baseline_y, const char *start, const char *end,
+                                      uint16_t color, int clip_x, int clip_y, int clip_w,
+                                      int clip_h);
+
+static int ui_u8g2_measure_span(const char *start, const char *end)
+{
+    int width = 0;
+    const char *ptr = start;
+
+    while (ptr && ptr < end && *ptr != '\0') {
+        uint32_t codepoint = 0;
+        size_t len = ui_utf8_decode_next(ptr, &codepoint);
+
+        if (len == 0) {
+            break;
+        }
+        if (codepoint == '\n' || codepoint == '\r') {
+            break;
+        }
+
+        width += ui_u8g2_measure_codepoint(codepoint);
+        ptr += len;
+    }
+
+    return width;
+}
+
+static void ui_u8g2_draw_span_clipped(int x, int baseline_y, const char *start, const char *end,
+                                      uint16_t color, int clip_x, int clip_y, int clip_w,
+                                      int clip_h)
+{
+    int cursor_x = x;
+    const char *ptr = start;
+
+    while (ptr && ptr < end && *ptr != '\0') {
+        uint32_t codepoint = 0;
+        size_t len = ui_utf8_decode_next(ptr, &codepoint);
+        ui_u8g2_glyph_t glyph;
+
+        if (len == 0) {
+            break;
+        }
+        if (codepoint == '\n' || codepoint == '\r') {
+            break;
+        }
+
+        if (ui_u8g2_lookup_glyph(&s_content_font, codepoint, &glyph)) {
+            ui_u8g2_draw_glyph_clipped(cursor_x, baseline_y, &glyph, color,
+                                       clip_x, clip_y, clip_w, clip_h);
+            cursor_x += ui_u8g2_glyph_advance(&glyph);
+        }
+        ptr += len;
+    }
+}
+
+static const char *ui_next_wrapped_span(const char *text, int max_width, ui_utf8_span_t *span)
+{
+    const char *ptr = text;
+    const char *line_start = text;
+    const char *last_break = NULL;
+    const char *resume = NULL;
+    int width = 0;
+    int width_at_break = 0;
+
+    if (!text || *text == '\0') {
+        span->start = "";
+        span->end = "";
+        span->width = 0;
+        return text ? text : "";
+    }
+
+    while (*line_start == ' ') {
+        line_start++;
+    }
+    ptr = line_start;
+
+    while (*ptr != '\0') {
+        uint32_t codepoint = 0;
+        size_t len;
+        int advance;
+
+        if (*ptr == '\n') {
+            span->start = line_start;
+            span->end = ptr;
+            span->width = width;
+            return ptr + 1;
+        }
+        if (*ptr == '\r') {
+            ptr++;
+            continue;
+        }
+
+        len = ui_utf8_decode_next(ptr, &codepoint);
+        if (len == 0) {
+            break;
+        }
+
+        if (codepoint == '\t') {
+            codepoint = ' ';
+        }
+
+        if (codepoint == ' ' && width == 0) {
+            ptr += len;
+            line_start = ptr;
+            continue;
+        }
+
+        advance = ui_u8g2_measure_codepoint(codepoint);
+        if (width > 0 && width + advance > max_width) {
+            if (last_break && last_break > line_start) {
+                span->start = line_start;
+                span->end = last_break;
+                span->width = width_at_break;
+                while (resume && *resume == ' ') {
+                    resume++;
+                }
+                return resume ? resume : ptr;
+            }
+
+            span->start = line_start;
+            span->end = ptr;
+            span->width = width;
+            return ptr;
+        }
+
+        if (codepoint == ' ') {
+            last_break = ptr;
+            resume = ptr + len;
+            width_at_break = width;
+        }
+
+        width += advance;
+        ptr += len;
+    }
+
+    span->start = line_start;
+    span->end = ptr;
+    span->width = width;
+    return ptr;
+}
+
+static int ui_scrolling_offset(int content_size, int viewport_size)
+{
+    int overflow = content_size - viewport_size;
+    int pause = UI_CONTENT_SCROLL_PAUSE_PX;
+    int cycle;
+    int pos;
+
+    if (overflow <= 0) {
+        return 0;
+    }
+
+    cycle = (overflow * 2) + (pause * 2);
+    pos = (int)((now_ms() / UI_CONTENT_SCROLL_STEP_MS) % cycle);
+    if (pos < pause) {
+        return 0;
+    }
+    pos -= pause;
+    if (pos < overflow) {
+        return pos;
+    }
+    pos -= overflow;
+    if (pos < pause) {
+        return overflow;
+    }
+    pos -= pause;
+    return overflow - pos;
+}
+
+static void ui_draw_utf8_block(int x, int y, int w, int h, uint16_t color, const char *text)
+{
+    const char *content = (text && text[0]) ? text : "Waiting for reply";
+    const char *ptr = content;
+    int line_height = s_content_font.max_char_height + UI_CONTENT_LINE_GAP;
+    int total_height = 0;
+    int scroll;
+
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+
+    for (;;) {
+        ui_utf8_span_t span;
+        const char *next = ui_next_wrapped_span(ptr, w, &span);
+        total_height += line_height;
+        if (*next == '\0') {
+            break;
+        }
+        ptr = next;
+    }
+
+    scroll = ui_scrolling_offset(total_height, h);
+    ptr = content;
+    for (int line_top = y - scroll;; line_top += line_height) {
+        ui_utf8_span_t span;
+        const char *next = ui_next_wrapped_span(ptr, w, &span);
+
+        if (line_top + line_height > y && line_top < y + h) {
+            ui_u8g2_draw_span_clipped(x, line_top + s_content_font.max_char_height,
+                                      span.start, span.end, color, x, y, w, h);
+        }
+        if (*next == '\0') {
+            break;
+        }
+        ptr = next;
+    }
+}
+
+static void ui_draw_utf8_marquee_line(int x, int y, int w, uint16_t color, const char *text)
+{
+    char preview[UI_DETAIL_LEN];
+    int text_width;
+    int baseline_y = y + s_content_font.max_char_height;
+    int gap = 24;
+    int shift;
+
+    ui_copy_utf8_text(preview, sizeof(preview), text, false);
+    if (preview[0] == '\0') {
+        ui_copy_utf8_text(preview, sizeof(preview), "Waiting for message", false);
+    }
+
+    text_width = ui_u8g2_measure_span(preview, preview + strlen(preview));
+    if (text_width <= w) {
+        ui_u8g2_draw_span_clipped(x, baseline_y, preview, preview + strlen(preview),
+                                  color, x, y, w, s_content_font.max_char_height + 2);
+        return;
+    }
+
+    shift = (int)((now_ms() / 45ULL) % (uint64_t)(text_width + gap));
+    ui_u8g2_draw_span_clipped(x - shift, baseline_y, preview, preview + strlen(preview),
+                              color, x, y, w, s_content_font.max_char_height + 2);
+    ui_u8g2_draw_span_clipped(x - shift + text_width + gap, baseline_y,
+                              preview, preview + strlen(preview), color,
+                              x, y, w, s_content_font.max_char_height + 2);
 }
 
 static int battery_percent_from_mv(int mv)
@@ -683,6 +1332,30 @@ static void render_metric_card(int x, int y, int w, int h, const char *label, co
     }
 }
 
+static void render_message_card(int x, int y, int w, int h, const char *label, const char *channel,
+                                const char *text, uint16_t fill, uint16_t border,
+                                uint16_t label_color, uint16_t text_color, uint16_t chip_fill,
+                                uint16_t chip_text, uint16_t shadow_color)
+{
+    int chip_w = 0;
+
+    fb_draw_panel(x, y, w, h, fill, border);
+    fb_draw_text_clipped_ex(x + 10, y + 8, 1, label_color, shadow_color, 10, label);
+
+    if (channel && channel[0]) {
+        chip_w = fb_text_width_chars(strlen(channel), 1) + 12;
+        if (chip_w > 84) {
+            chip_w = 84;
+        }
+        fb_draw_panel(x + w - chip_w - 10, y + 4, chip_w, 14, chip_fill, border);
+        fb_draw_text_centered_clipped_ex(x + w - chip_w - 10, y + 8, chip_w, 1,
+                                         chip_text, shadow_color, fb_chars_for_width(chip_w - 8, 1),
+                                         channel);
+    }
+
+    ui_draw_utf8_block(x + 12, y + 22, w - 24, h - 28, text_color, text);
+}
+
 static void render_status_page(const board_ui_state_t *ui, bool wifi_connected, const char *ip)
 {
     char battery_line[32];
@@ -699,35 +1372,39 @@ static void render_status_page(const board_ui_state_t *ui, bool wifi_connected, 
     uint16_t accent = wifi_connected ? rgb565(70, 220, 120) : rgb565(235, 170, 20);
     const char *title = ui->title[0] ? ui->title : "READY";
     const char *detail = ui->detail[0] ? ui->detail : "AWAITING INPUT";
-    const char *last_rx = ui->last_rx[0] ? ui->last_rx : "WAITING";
-    const char *last_tx = ui->last_tx[0] ? ui->last_tx : "WAITING";
+    bool has_reply = ui->outbound_count > 0 && ui->last_tx[0];
+    const char *content_label = has_reply ? "REPLY" : "MESSAGE";
+    const char *content_channel = has_reply ?
+        (ui->last_tx_channel[0] ? ui->last_tx_channel : ui->last_source) :
+        (ui->last_source[0] ? ui->last_source : "SYSTEM");
+    const char *content_text = has_reply ? ui->last_tx : ui->last_rx;
 
     fb_fill_rect(0, 0, BOARD_LCD_H_RES, BOARD_LCD_V_RES, bg);
-    fb_fill_rect(0, 0, BOARD_LCD_H_RES, 28, header_bg);
+    fb_fill_rect(0, 0, BOARD_LCD_H_RES, 20, header_bg);
     fb_fill_rect(0, BOARD_LCD_V_RES - 24, BOARD_LCD_H_RES, 24, footer_bg);
-    fb_fill_rect(0, 28, BOARD_LCD_H_RES, 1, line);
+    fb_fill_rect(0, 20, BOARD_LCD_H_RES, 1, line);
     fb_fill_rect(0, BOARD_LCD_V_RES - 24, BOARD_LCD_H_RES, 1, line);
 
-    fb_draw_text_clipped_ex(12, 8, 2, white, shadow, 14, "MIMICLAW");
-    fb_draw_panel(154, 4, 74, 20,
+    fb_draw_text_clipped_ex(12, 6, 1, white, shadow, 14, "MIMICLAW");
+    fb_draw_panel(166, 3, 62, 14,
                   wifi_connected ? rgb565(18, 52, 28) : rgb565(62, 42, 14), line);
-    fb_draw_text_centered_clipped_ex(154, 10, 74, 1, accent, shadow, 10,
+    fb_draw_text_centered_clipped_ex(166, 6, 62, 1, accent, shadow, 10,
                                      wifi_connected ? "ONLINE" : "OFFLINE");
 
-    fb_draw_panel(12, 38, 216, 72, card, line);
-    fb_draw_text_clipped_ex(22, 48, 1, dim, shadow, 12, "CURRENT STATE");
-    fb_draw_text_centered_clipped_ex(20, 62, 200, 3, white, shadow,
-                                     fb_chars_for_width(200, 3), title);
-    fb_draw_text_centered_clipped_ex(18, 86, 204, 2, sky, shadow,
-                                     fb_chars_for_width(204, 2), detail);
+    fb_draw_panel(12, 24, 216, 24, card_alt, line);
+    fb_draw_text_clipped_ex(20, 31, 1, dim, shadow, 10, "STATUS");
+    fb_draw_text_clipped_ex(72, 31, 1, white, shadow, 10, title);
+    fb_draw_text_centered_clipped_ex(112, 31, 104, 1, sky, shadow,
+                                     fb_chars_for_width(104, 1), detail);
 
-    fb_draw_panel(12, 120, 216, 40, card_alt, line);
-    fb_draw_text_clipped_ex(22, 128, 1, dim, shadow, 10, "LAST RX");
-    fb_draw_text_block_clipped_ex(22, 140, 2, white, shadow, fb_chars_for_width(188, 2), 1, last_rx);
+    render_message_card(12, 52, 216, 138, content_label, content_channel, content_text,
+                        card, line, dim, white,
+                        wifi_connected ? rgb565(18, 52, 28) : rgb565(62, 42, 14),
+                        accent, shadow);
 
-    fb_draw_panel(12, 168, 216, 40, card_alt, line);
-    fb_draw_text_clipped_ex(22, 176, 1, dim, shadow, 10, "LAST TX");
-    fb_draw_text_block_clipped_ex(22, 188, 2, white, shadow, fb_chars_for_width(188, 2), 1, last_tx);
+    fb_draw_panel(12, 194, 216, 22, card_alt, line);
+    fb_draw_text_clipped_ex(20, 200, 1, dim, shadow, 6, "PROMPT");
+    ui_draw_utf8_marquee_line(74, 196, 144, sky, ui->last_rx);
 
     snprintf(battery_line, sizeof(battery_line), "BAT %d%%", s_battery_pct >= 0 ? s_battery_pct : 0);
     fb_draw_text_clipped_ex(10, 222, 1, sky, shadow, 10, battery_line);
@@ -844,24 +1521,14 @@ static void board_ui_render(void)
     }
 }
 
-static void board_ui_format_message(char *dst, size_t dst_len, const mimi_msg_t *msg)
+static void board_ui_copy_message_content(char *dst, size_t dst_len, const mimi_msg_t *msg)
 {
-    char text[UI_LINE_LEN];
-
     if (!msg) {
         dst[0] = '\0';
         return;
     }
 
-    ui_normalize_text(text, sizeof(text), msg->content ? msg->content : "");
-    if (text[0] == '\0') {
-        snprintf(dst, dst_len, "%s", msg->channel);
-        ui_normalize_text(dst, dst_len, dst);
-        return;
-    }
-
-    snprintf(dst, dst_len, "%s %s", msg->channel, text);
-    ui_normalize_text(dst, dst_len, dst);
+    ui_copy_utf8_text(dst, dst_len, msg->content ? msg->content : "", true);
 }
 
 static uint8_t board_ui_cycle_page(void)
@@ -1015,6 +1682,7 @@ esp_err_t board_ui_init(void)
     ESP_RETURN_ON_FALSE(s_framebuffer != NULL, ESP_ERR_NO_MEM, TAG, "framebuffer alloc failed");
 
     power_sample_update(true);
+    ui_content_font_init();
     s_ui.last_activity_ms = now_ms();
     s_ui.phase_since_ms = s_ui.last_activity_ms;
 
@@ -1056,33 +1724,34 @@ void board_ui_note_text(const char *title, const char *detail)
 
 void board_ui_note_inbound(const mimi_msg_t *msg)
 {
-    char line[UI_LINE_LEN];
+    char content[UI_CONTENT_LEN];
     if (!msg) {
         return;
     }
 
-    board_ui_format_message(line, sizeof(line), msg);
+    board_ui_copy_message_content(content, sizeof(content), msg);
     portENTER_CRITICAL(&s_ui_lock);
     s_ui.inbound_count++;
     ui_touch_locked(now_ms());
     ui_normalize_text(s_ui.last_source, sizeof(s_ui.last_source), msg->channel);
-    strncpy(s_ui.last_rx, line, sizeof(s_ui.last_rx) - 1);
+    strncpy(s_ui.last_rx, content, sizeof(s_ui.last_rx) - 1);
     s_ui.last_rx[sizeof(s_ui.last_rx) - 1] = '\0';
     portEXIT_CRITICAL(&s_ui_lock);
 }
 
 void board_ui_note_outbound(const mimi_msg_t *msg)
 {
-    char line[UI_LINE_LEN];
+    char content[UI_CONTENT_LEN];
     if (!msg) {
         return;
     }
 
-    board_ui_format_message(line, sizeof(line), msg);
+    board_ui_copy_message_content(content, sizeof(content), msg);
     portENTER_CRITICAL(&s_ui_lock);
     s_ui.outbound_count++;
     ui_touch_locked(now_ms());
-    strncpy(s_ui.last_tx, line, sizeof(s_ui.last_tx) - 1);
+    ui_normalize_text(s_ui.last_tx_channel, sizeof(s_ui.last_tx_channel), msg->channel);
+    strncpy(s_ui.last_tx, content, sizeof(s_ui.last_tx) - 1);
     s_ui.last_tx[sizeof(s_ui.last_tx) - 1] = '\0';
     portEXIT_CRITICAL(&s_ui_lock);
 }
