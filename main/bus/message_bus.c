@@ -1,5 +1,6 @@
 #include "message_bus.h"
 #include "mimi_config.h"
+#include "board_ui.h"
 #include "esp_log.h"
 #include <string.h>
 
@@ -28,6 +29,7 @@ esp_err_t message_bus_push_inbound(const mimi_msg_t *msg)
         ESP_LOGW(TAG, "Inbound queue full, dropping message");
         return ESP_ERR_NO_MEM;
     }
+    board_ui_note_inbound(msg);
     return ESP_OK;
 }
 
@@ -46,6 +48,7 @@ esp_err_t message_bus_push_outbound(const mimi_msg_t *msg)
         ESP_LOGW(TAG, "Outbound queue full, dropping message");
         return ESP_ERR_NO_MEM;
     }
+    board_ui_note_outbound(msg);
     return ESP_OK;
 }
 

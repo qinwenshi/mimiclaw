@@ -1,6 +1,7 @@
 #include "wifi_onboard.h"
 #include "onboard_html.h"
 #include "mimi_config.h"
+#include "llm/llm_proxy.h"
 #include "wifi/wifi_manager.h"
 
 #include <stdint.h>
@@ -220,6 +221,7 @@ static esp_err_t http_get_config(httpd_req_t *req)
     json_add_effective_config(root, "api_key", MIMI_NVS_LLM, MIMI_NVS_KEY_API_KEY, MIMI_SECRET_API_KEY);
     json_add_effective_config(root, "model", MIMI_NVS_LLM, MIMI_NVS_KEY_MODEL, MIMI_SECRET_MODEL);
     json_add_effective_config(root, "provider", MIMI_NVS_LLM, MIMI_NVS_KEY_PROVIDER, MIMI_SECRET_MODEL_PROVIDER);
+    json_add_effective_config(root, "openai_url", MIMI_NVS_LLM, MIMI_NVS_KEY_OPENAI_API_URL, MIMI_SECRET_OPENAI_API_URL);
     json_add_effective_config(root, "tg_token", MIMI_NVS_TG, MIMI_NVS_KEY_TG_TOKEN, MIMI_SECRET_TG_TOKEN);
     json_add_effective_config(root, "feishu_app_id", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_APP_ID, MIMI_SECRET_FEISHU_APP_ID);
     json_add_effective_config(root, "feishu_app_secret", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_APP_SECRET, MIMI_SECRET_FEISHU_APP_SECRET);
@@ -303,6 +305,15 @@ static void nvs_sync_u16_field(cJSON *root, const char *json_key,
     }
 }
 
+static esp_err_t sync_openai_url_field(cJSON *root)
+{
+    cJSON *item = cJSON_GetObjectItem(root, "openai_url");
+    if (!item || !cJSON_IsString(item)) {
+        return ESP_OK;
+    }
+    return llm_set_openai_api_url(item->valuestring);
+}
+
 static esp_err_t http_post_save(httpd_req_t *req)
 {
     int total_len = req->content_len;
@@ -343,6 +354,12 @@ static esp_err_t http_post_save(httpd_req_t *req)
     nvs_sync_field(root, "api_key",  MIMI_NVS_LLM,    MIMI_NVS_KEY_API_KEY);
     nvs_sync_field(root, "model",    MIMI_NVS_LLM,    MIMI_NVS_KEY_MODEL);
     nvs_sync_field(root, "provider", MIMI_NVS_LLM,    MIMI_NVS_KEY_PROVIDER);
+    esp_err_t openai_url_err = sync_openai_url_field(root);
+    if (openai_url_err != ESP_OK) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid openai_url");
+        return ESP_FAIL;
+    }
 
     /* Telegram */
     nvs_sync_field(root, "tg_token", MIMI_NVS_TG,     MIMI_NVS_KEY_TG_TOKEN);

@@ -37,10 +37,15 @@ MimiClaw 把一块小小的 ESP32-S3 开发板变成你的私人 AI 助理。插
 
 ### 你需要
 
-- 一块 **ESP32-S3 开发板**，16MB Flash + 8MB PSRAM（如小智 AI 开发板，~¥30）
+- 一块 **ESP32-S3 开发板**，16MB Flash + 8MB PSRAM。当前仓库已经直接适配 `esp32-1.54`，会启用板载 240x240 LCD、WS2812 状态灯、按键以及电池/USB 检测。
 - 一根 **USB Type-C 数据线**
 - 一个 **Telegram Bot Token** — 在 Telegram 找 [@BotFather](https://t.me/BotFather) 创建
 - 一个 **Anthropic API Key** — 从 [console.anthropic.com](https://console.anthropic.com) 获取，或一个 **OpenAI API Key** — 从 [platform.openai.com](https://platform.openai.com) 获取
+
+在 `esp32-1.54` 上，固件会额外启用本地状态界面：
+
+- LCD 会显示 WiFi/IP、Agent 当前阶段、最近收发摘要、电量和内存状态。
+- `POWER` 唤醒屏幕，`VOL_UP` 切换亮度，`VOL_DOWN` 触发 `heartbeat_trigger`，`BOOT` 短按切页、长按重启。
 
 ### 安装
 
@@ -150,7 +155,7 @@ ls /dev/ttyACM*          # Linux
 idf.py -p PORT flash monitor
 ```
 
-> **注意：请插对 USB 口！** 大多数 ESP32-S3 开发板有两个 Type-C 接口，必须插标有 **USB** 的那个口（原生 USB Serial/JTAG），**不要**插标有 **COM** 的口（外部 UART 桥接）。插错口会导致烧录/监控失败。
+> **注意：** `esp32-1.54` 直接使用原生 **USB Serial/JTAG** 口完成烧录和 CLI 交互，不需要单独的 UART/COM 口。如果你使用的是其他带双口的 ESP32-S3 开发板，烧录时依然优先使用原生 `USB` 口。
 >
 > <details>
 > <summary>查看参考图片</summary>
@@ -174,7 +179,7 @@ mimi> clear_proxy                    # 清除代理
 
 > **提示**：确保 ESP32-S3 和代理机器在同一局域网。Clash Verge 在「设置 → 允许局域网」中开启。
 
-### CLI 命令（通过 UART/COM 口连接）
+### CLI 命令（在 esp32-1.54 上通过 USB Serial/JTAG 连接）
 
 通过串口连接即可配置和调试。**配置命令**让你无需重新编译就能修改设置 — 随时随地插上 USB 线就能改。
 
@@ -208,43 +213,22 @@ mimi> cron_start                  # 立即启动 cron 调度器
 mimi> restart                     # 重启
 ```
 
-### USB (JTAG) 与 UART：哪个口做什么
+### USB 端口说明
 
-大多数 ESP32-S3 开发板有 **两个 USB-C 口**：
-
-| 端口 | 用途 |
-|------|------|
-| **USB**（JTAG） | `idf.py flash`、JTAG 调试 |
-| **COM**（UART） | **REPL 命令行**、串口控制台 |
-
-> **REPL 必须连接 UART（COM）口。** USB（JTAG）口不支持交互式 REPL 输入。
+在 `esp32-1.54` 上，一根原生 **USB Serial/JTAG** 线就够了，既能 `idf.py flash`，也能直接进入交互式 CLI，不需要外置 UART 桥。
 
 <details>
-<summary>端口详情与推荐工作流</summary>
+<summary>推荐工作流</summary>
 
-| 端口 | 标注 | 协议 |
-|------|------|------|
-| **USB** | USB / JTAG | 原生 USB Serial/JTAG |
-| **COM** | UART / COM | 外置 UART 桥接芯片（CP2102/CH340） |
-
-ESP-IDF 控制台默认配置为 UART 输出（`CONFIG_ESP_CONSOLE_UART_DEFAULT=y`）。
-
-**同时连接两个口时：**
-
-- USB（JTAG）口负责烧录/下载，并提供辅助串口输出
-- UART（COM）口提供主要的交互式控制台，用于 REPL
-- macOS 下两个口都会显示为 `/dev/cu.usbmodem*` 或 `/dev/cu.usbserial-*`，用 `ls /dev/cu.usb*` 区分
-- Linux 下 USB（JTAG）通常是 `/dev/ttyACM0`，UART 通常是 `/dev/ttyUSB0`
-
-**推荐工作流：**
+- `esp32-1.54`：原生 USB 口同时用于烧录和 `monitor`
+- 其他双口 ESP32-S3 板：通常用原生 USB/JTAG 烧录，是否需要额外 UART/COM 取决于该板子的控制台接法
 
 ```bash
-# 通过 USB（JTAG）口烧录
+# 在 esp32-1.54 上烧录
 idf.py -p /dev/cu.usbmodem11401 flash
 
-# 通过 UART（COM）口打开 REPL
-idf.py -p /dev/cu.usbserial-110 monitor
-# 或使用任意串口工具：screen、minicom、PuTTY，波特率 115200
+# 在同一个 USB Serial/JTAG 口打开 CLI
+idf.py -p /dev/cu.usbmodem11401 monitor
 ```
 
 </details>

@@ -26,6 +26,7 @@
 #include "heartbeat/heartbeat.h"
 #include "skills/skill_loader.h"
 #include "onboard/wifi_onboard.h"
+#include "board_ui.h"
 
 static const char *TAG = "mimi";
 
@@ -77,6 +78,7 @@ static void outbound_dispatch_task(void *arg)
             esp_err_t send_err = telegram_send_message(msg.chat_id, msg.content);
             if (send_err != ESP_OK) {
                 ESP_LOGE(TAG, "Telegram send failed for %s: %s", msg.chat_id, esp_err_to_name(send_err));
+                board_ui_set_phase(BOARD_UI_PHASE_ERROR, "SEND FAIL", "TELEGRAM");
             } else {
                 ESP_LOGI(TAG, "Telegram send success for %s (%d bytes)", msg.chat_id, (int)strlen(msg.content));
             }
@@ -84,6 +86,7 @@ static void outbound_dispatch_task(void *arg)
             esp_err_t send_err = feishu_send_message(msg.chat_id, msg.content);
             if (send_err != ESP_OK) {
                 ESP_LOGE(TAG, "Feishu send failed for %s: %s", msg.chat_id, esp_err_to_name(send_err));
+                board_ui_set_phase(BOARD_UI_PHASE_ERROR, "SEND FAIL", "FEISHU");
             } else {
                 ESP_LOGI(TAG, "Feishu send success for %s (%d bytes)", msg.chat_id, (int)strlen(msg.content));
             }
@@ -91,6 +94,7 @@ static void outbound_dispatch_task(void *arg)
             esp_err_t ws_err = ws_server_send(msg.chat_id, msg.content);
             if (ws_err != ESP_OK) {
                 ESP_LOGW(TAG, "WS send failed for %s: %s", msg.chat_id, esp_err_to_name(ws_err));
+                board_ui_set_phase(BOARD_UI_PHASE_ERROR, "SEND FAIL", "WEBSOCKET");
             }
         } else if (strcmp(msg.channel, MIMI_CHAN_SYSTEM) == 0) {
             ESP_LOGI(TAG, "System message [%s]: %.128s", msg.chat_id, msg.content);
@@ -120,9 +124,12 @@ void app_main(void)
     /* Phase 1: Core infrastructure */
     ESP_ERROR_CHECK(init_nvs());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(board_ui_init());
+    board_ui_set_phase(BOARD_UI_PHASE_BOOT, "BOOT", "MOUNT SPIFFS");
     ESP_ERROR_CHECK(init_spiffs());
 
     /* Initialize subsystems */
+    board_ui_set_phase(BOARD_UI_PHASE_BOOT, "BOOT", "INIT SERVICES");
     ESP_ERROR_CHECK(message_bus_init());
     ESP_ERROR_CHECK(memory_store_init());
     ESP_ERROR_CHECK(skill_loader_init());
@@ -139,8 +146,10 @@ void app_main(void)
 
     /* Start Serial CLI first (works without WiFi) */
     ESP_ERROR_CHECK(serial_cli_init());
+    board_ui_note_text("CLI", "USB SERIAL READY");
 
     /* Start WiFi */
+    board_ui_set_phase(BOARD_UI_PHASE_WIFI, "WIFI", "JOINING NETWORK");
     esp_err_t wifi_err = wifi_manager_start();
     bool wifi_ok = false;
     if (wifi_err == ESP_OK) {
@@ -150,15 +159,19 @@ void app_main(void)
         if (wifi_manager_wait_connected(30000) == ESP_OK) {
             wifi_ok = true;
             ESP_LOGI(TAG, "WiFi connected: %s", wifi_manager_get_ip());
+            board_ui_note_text("WIFI", wifi_manager_get_ip());
         } else {
             ESP_LOGW(TAG, "WiFi connection timeout");
+            board_ui_set_phase(BOARD_UI_PHASE_ONBOARDING, "WIFI", "TIMEOUT");
         }
     } else {
         ESP_LOGW(TAG, "No WiFi credentials configured");
+        board_ui_set_phase(BOARD_UI_PHASE_ONBOARDING, "ONBOARD", "NO WIFI CONFIG");
     }
 
     if (!wifi_ok) {
         ESP_LOGW(TAG, "Entering WiFi onboarding mode...");
+        board_ui_set_phase(BOARD_UI_PHASE_ONBOARDING, "ONBOARD", "CONNECT TO MIMICLAW AP");
         wifi_onboard_start(WIFI_ONBOARD_MODE_CAPTIVE);  /* blocks, restarts on success */
         return;  /* unreachable */
     }
@@ -184,6 +197,7 @@ void app_main(void)
         ESP_ERROR_CHECK(ws_server_start());
 
         ESP_LOGI(TAG, "All services started!");
+        board_ui_set_phase(BOARD_UI_PHASE_READY, "READY", "AWAITING INPUT");
     }
 
     ESP_LOGI(TAG, "MimiClaw ready. Type 'help' for CLI commands.");

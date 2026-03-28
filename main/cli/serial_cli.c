@@ -30,6 +30,9 @@
 
 static const char *TAG = "cli";
 
+#define MIMI_CLI_REPL_STACK        (8 * 1024)
+#define MIMI_CLI_NETCMD_STACK      (12 * 1024)
+
 /* --- wifi_set command --- */
 static struct {
     struct arg_str *ssid;
@@ -76,6 +79,21 @@ static int cmd_set_tg_token(int argc, char **argv)
     return 0;
 }
 
+static int cmd_clear_tg_token(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    esp_err_t err = telegram_clear_token();
+    if (err != ESP_OK) {
+        printf("Failed to clear Telegram bot token: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("Telegram bot token cleared.\n");
+    return 0;
+}
+
 /* --- set_feishu_creds command --- */
 static struct {
     struct arg_str *app_id;
@@ -89,6 +107,21 @@ static struct {
     struct arg_str *text;
     struct arg_end *end;
 } feishu_send_args;
+
+typedef struct {
+    char *receive_id;
+    char *text;
+    esp_err_t err;
+    SemaphoreHandle_t done;
+} feishu_send_task_ctx_t;
+
+static void feishu_send_task(void *arg)
+{
+    feishu_send_task_ctx_t *task_ctx = (feishu_send_task_ctx_t *)arg;
+    task_ctx->err = feishu_send_message(task_ctx->receive_id, task_ctx->text);
+    xSemaphoreGive(task_ctx->done);
+    vTaskDelete(NULL);
+}
 
 static int cmd_set_feishu_creds(int argc, char **argv)
 {
@@ -105,14 +138,55 @@ static int cmd_set_feishu_creds(int argc, char **argv)
 
 static int cmd_feishu_send(int argc, char **argv)
 {
+    feishu_send_task_ctx_t *ctx = NULL;
+    char *receive_id_copy = NULL;
+    char *text_copy = NULL;
+
     int nerrors = arg_parse(argc, argv, (void **)&feishu_send_args);
     if (nerrors != 0) {
         arg_print_errors(stderr, feishu_send_args.end, argv[0]);
         return 1;
     }
 
-    esp_err_t err = feishu_send_message(feishu_send_args.receive_id->sval[0],
-                                        feishu_send_args.text->sval[0]);
+    ctx = calloc(1, sizeof(*ctx));
+    receive_id_copy = strdup(feishu_send_args.receive_id->sval[0]);
+    text_copy = strdup(feishu_send_args.text->sval[0]);
+    if (!ctx || !receive_id_copy || !text_copy) {
+        free(text_copy);
+        free(receive_id_copy);
+        free(ctx);
+        printf("Out of memory.\n");
+        return 1;
+    }
+
+    ctx->receive_id = receive_id_copy;
+    ctx->text = text_copy;
+    ctx->done = xSemaphoreCreateBinary();
+    if (!ctx->done) {
+        free(text_copy);
+        free(receive_id_copy);
+        free(ctx);
+        printf("Out of memory.\n");
+        return 1;
+    }
+
+    if (xTaskCreate(feishu_send_task, "cli_feishu_send", MIMI_CLI_NETCMD_STACK,
+                    ctx, 5, NULL) != pdPASS) {
+        vSemaphoreDelete(ctx->done);
+        free(text_copy);
+        free(receive_id_copy);
+        free(ctx);
+        printf("Failed to start feishu_send task.\n");
+        return 1;
+    }
+
+    xSemaphoreTake(ctx->done, portMAX_DELAY);
+    esp_err_t err = ctx->err;
+    vSemaphoreDelete(ctx->done);
+    free(text_copy);
+    free(receive_id_copy);
+    free(ctx);
+
     printf("feishu_send status: %s\n", esp_err_to_name(err));
     return (err == ESP_OK) ? 0 : 1;
 }
@@ -168,6 +242,46 @@ static int cmd_set_model_provider(int argc, char **argv)
     }
     llm_set_provider(provider_args.provider->sval[0]);
     printf("Model provider set.\n");
+    return 0;
+}
+
+/* --- set_openai_url command --- */
+static struct {
+    struct arg_str *url;
+    struct arg_end *end;
+} openai_url_args;
+
+static int cmd_set_openai_url(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&openai_url_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, openai_url_args.end, argv[0]);
+        return 1;
+    }
+
+    esp_err_t err = llm_set_openai_api_url(openai_url_args.url->sval[0]);
+    if (err != ESP_OK) {
+        printf("Invalid OpenAI URL. Use full http(s)://host/path format.\n");
+        return 1;
+    }
+
+    printf("OpenAI URL saved.\n");
+    return 0;
+}
+
+/* --- clear_openai_url command --- */
+static int cmd_clear_openai_url(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    esp_err_t err = llm_set_openai_api_url("");
+    if (err != ESP_OK) {
+        printf("Failed to clear OpenAI URL: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+
+    printf("OpenAI URL cleared. Default endpoint restored.\n");
     return 0;
 }
 
@@ -563,6 +677,7 @@ static int cmd_config_show(int argc, char **argv)
     print_config("API Key",    MIMI_NVS_LLM,    MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_API_KEY,    true);
     print_config("Model",      MIMI_NVS_LLM,    MIMI_NVS_KEY_MODEL,    MIMI_SECRET_MODEL,      false);
     print_config("Provider",   MIMI_NVS_LLM,    MIMI_NVS_KEY_PROVIDER, MIMI_SECRET_MODEL_PROVIDER, false);
+    print_config("OpenAI URL", MIMI_NVS_LLM,    MIMI_NVS_KEY_OPENAI_API_URL, MIMI_SECRET_OPENAI_API_URL, false);
     print_config("Proxy Host", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_HOST, MIMI_SECRET_PROXY_HOST, false);
     print_config_u16("Proxy Port", MIMI_NVS_PROXY, MIMI_NVS_KEY_PROXY_PORT, MIMI_SECRET_PROXY_PORT);
     print_config("Search Key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_SEARCH_KEY, true);
@@ -782,6 +897,7 @@ esp_err_t serial_cli_init(void)
     esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     repl_config.prompt = "mimi> ";
     repl_config.max_cmdline_length = 256;
+    repl_config.task_stack_size = MIMI_CLI_REPL_STACK;
 
 #if CONFIG_ESP_CONSOLE_UART_DEFAULT || CONFIG_ESP_CONSOLE_UART_CUSTOM
     esp_console_dev_uart_config_t hw_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
@@ -840,6 +956,13 @@ esp_err_t serial_cli_init(void)
     };
     esp_console_cmd_register(&tg_token_cmd);
 
+    esp_console_cmd_t clear_tg_token_cmd = {
+        .command = "clear_tg_token",
+        .help = "Clear Telegram bot token override and restore build-time default",
+        .func = &cmd_clear_tg_token,
+    };
+    esp_console_cmd_register(&clear_tg_token_cmd);
+
     /* set_feishu_creds */
     feishu_creds_args.app_id = arg_str1(NULL, NULL, "<app_id>", "Feishu App ID");
     feishu_creds_args.app_secret = arg_str1(NULL, NULL, "<app_secret>", "Feishu App Secret");
@@ -896,6 +1019,25 @@ esp_err_t serial_cli_init(void)
         .argtable = &provider_args,
     };
     esp_console_cmd_register(&provider_cmd);
+
+    /* set_openai_url */
+    openai_url_args.url = arg_str1(NULL, NULL, "<url>", "OpenAI-compatible http(s) URL");
+    openai_url_args.end = arg_end(1);
+    esp_console_cmd_t openai_url_cmd = {
+        .command = "set_openai_url",
+        .help = "Set custom OpenAI base URL or endpoint (e.g. https://host or https://host/v1/chat/completions)",
+        .func = &cmd_set_openai_url,
+        .argtable = &openai_url_args,
+    };
+    esp_console_cmd_register(&openai_url_cmd);
+
+    /* clear_openai_url */
+    esp_console_cmd_t clear_openai_url_cmd = {
+        .command = "clear_openai_url",
+        .help = "Remove custom OpenAI URL and use the built-in default",
+        .func = &cmd_clear_openai_url,
+    };
+    esp_console_cmd_register(&clear_openai_url_cmd);
 
     /* skill_list */
     esp_console_cmd_t skill_list_cmd = {

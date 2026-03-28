@@ -37,10 +37,15 @@ You send a message on Telegram. The ESP32-S3 picks it up over WiFi, feeds it int
 
 ### What You Need
 
-- An **ESP32-S3 dev board** with 16 MB flash and 8 MB PSRAM (e.g. Xiaozhi AI board, ~$10)
+- An **ESP32-S3 board** with 16 MB flash and 8 MB PSRAM. `esp32-1.54` is supported directly in this tree and enables the onboard 240x240 LCD, WS2812 status LED, buttons, and battery/USB sensing.
 - A **USB Type-C cable**
 - A **Telegram bot token** — talk to [@BotFather](https://t.me/BotFather) on Telegram to create one
 - An **Anthropic API key** — from [console.anthropic.com](https://console.anthropic.com), or an **OpenAI API key** — from [platform.openai.com](https://platform.openai.com)
+
+When running on `esp32-1.54`, the firmware now exposes a local status UI:
+
+- The LCD shows WiFi/IP, agent phase, recent inbound/outbound traffic, battery level, and memory stats.
+- `POWER` wakes the screen, `VOL_UP` cycles brightness, `VOL_DOWN` triggers `heartbeat_trigger`, and `BOOT` switches pages or restarts on long press.
 
 ### Install
 
@@ -150,7 +155,7 @@ ls /dev/ttyACM*          # Linux
 idf.py -p PORT flash monitor
 ```
 
-> **Important: Plug into the correct USB port!** Most ESP32-S3 boards have two USB-C ports. You must use the one labeled **USB** (native USB Serial/JTAG), **not** the one labeled **COM** (external UART bridge). Plugging into the wrong port will cause flash/monitor failures.
+> **Important:** `esp32-1.54` uses the native **USB Serial/JTAG** port for both flashing and the CLI. If you are using a different ESP32-S3 board with separate `USB` and `COM` ports, use the native `USB` port for flashing.
 >
 > <details>
 > <summary>Show reference photo</summary>
@@ -159,7 +164,7 @@ idf.py -p PORT flash monitor
 >
 > </details>
 
-### CLI Commands (via UART/COM port)
+### CLI Commands (via USB Serial/JTAG on esp32-1.54)
 
 Connect via serial to configure or debug. **Config commands** let you change settings without recompiling — just plug in a USB cable anywhere.
 
@@ -193,43 +198,22 @@ mimi> cron_start                  # start cron scheduler now
 mimi> restart                     # reboot
 ```
 
-### USB (JTAG) vs UART: Which Port for What
+### USB Port Notes
 
-Most ESP32-S3 dev boards expose **two USB-C ports**:
-
-| Port | Use for |
-|------|---------|
-| **USB** (JTAG) | `idf.py flash`, JTAG debugging |
-| **COM** (UART) | **REPL CLI**, serial console |
-
-> **REPL requires the UART (COM) port.** The USB (JTAG) port does not support interactive REPL input.
+On `esp32-1.54`, a single native **USB Serial/JTAG** connection is enough for both `idf.py flash` and the interactive CLI. No external UART bridge is required.
 
 <details>
-<summary>Port details & recommended workflow</summary>
+<summary>Recommended workflow</summary>
 
-| Port | Label | Protocol |
-|------|-------|----------|
-| **USB** | USB / JTAG | Native USB Serial/JTAG |
-| **COM** | UART / COM | External UART bridge (CP2102/CH340) |
-
-The ESP-IDF console/REPL is configured to use UART by default (`CONFIG_ESP_CONSOLE_UART_DEFAULT=y`).
-
-**If you have both ports connected simultaneously:**
-
-- USB (JTAG) handles flash/download and provides secondary serial output
-- UART (COM) provides the primary interactive console for the REPL
-- macOS: both appear as `/dev/cu.usbmodem*` or `/dev/cu.usbserial-*` — run `ls /dev/cu.usb*` to identify
-- Linux: USB (JTAG) → `/dev/ttyACM0`, UART → `/dev/ttyUSB0`
-
-**Recommended workflow:**
+- `esp32-1.54`: use the native USB port for both flashing and `monitor`
+- Other ESP32-S3 boards with dual USB ports: use native USB/JTAG for flashing; whether a second UART/COM port is needed depends on that board's console wiring
 
 ```bash
-# Flash via USB (JTAG) port
+# Flash and open the interactive monitor on esp32-1.54
 idf.py -p /dev/cu.usbmodem11401 flash
 
-# Open REPL via UART (COM) port
-idf.py -p /dev/cu.usbserial-110 monitor
-# or use any serial terminal: screen, minicom, PuTTY at 115200 baud
+# Or just open the CLI on the same USB Serial/JTAG port
+idf.py -p /dev/cu.usbmodem11401 monitor
 ```
 
 </details>

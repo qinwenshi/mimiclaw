@@ -3,10 +3,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* GPIO defaults for ESP32-S3-LCD-1.47B safe user-accessible pins */
-#define MIMI_GPIO_MIN_PIN       1
-#define MIMI_GPIO_MAX_PIN       21
-#define MIMI_GPIO_ALLOWED_CSV   "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,21,38,46"
+/* GPIO defaults for esp32-1.54 safe user-accessible pins */
+#define MIMI_GPIO_MIN_PIN       0
+#define MIMI_GPIO_MAX_PIN       48
+#define MIMI_GPIO_ALLOWED_CSV   "2,3,11,12,17,21,38,41,42,45,46"
 
 /**
  * Check if a pin is allowed for user GPIO operations.

@@ -113,6 +113,46 @@ bool gpio_policy_pin_forbidden_hint(int pin, char *result, size_t result_len)
                  pin);
         return true;
     }
+    switch (pin) {
+    case 0:
+        snprintf(result, result_len,
+                 "Error: pin 0 is the BOOT button on esp32-1.54; choose a different pin");
+        return true;
+    case 1:
+        snprintf(result, result_len,
+                 "Error: pin 1 is used for USB power detection on esp32-1.54; choose a different pin");
+        return true;
+    case 7:
+    case 15:
+    case 16:
+        snprintf(result, result_len,
+                 "Error: pin %d is reserved for I2S speaker output on esp32-1.54; choose a different pin",
+                 pin);
+        return true;
+    case 8:
+    case 9:
+    case 10:
+    case 13:
+    case 14:
+    case 18:
+        snprintf(result, result_len,
+                 "Error: pin %d is reserved for the ST7789 display/backlight on esp32-1.54; choose a different pin",
+                 pin);
+        return true;
+    case 39:
+    case 40:
+    case 47:
+        snprintf(result, result_len,
+                 "Error: pin %d is connected to a front-panel button on esp32-1.54; choose a different pin",
+                 pin);
+        return true;
+    case 48:
+        snprintf(result, result_len,
+                 "Error: pin 48 drives the WS2812 status LED on esp32-1.54; choose a different pin");
+        return true;
+    default:
+        break;
+    }
 #else
     (void)pin;
     (void)result;

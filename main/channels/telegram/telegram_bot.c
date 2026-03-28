@@ -12,6 +12,8 @@
 #include "esp_crt_bundle.h"
 #include "nvs.h"
 #include "cJSON.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "telegram";
 
@@ -19,6 +21,7 @@ static char s_bot_token[128] = MIMI_SECRET_TG_TOKEN;
 static int64_t s_update_offset = 0;
 static int64_t s_last_saved_offset = -1;
 static int64_t s_last_offset_save_us = 0;
+static TaskHandle_t s_poll_task = NULL;
 
 #define TG_OFFSET_NVS_KEY            "update_offset"
 #define TG_DEDUP_CACHE_SIZE          64
@@ -281,6 +284,11 @@ static bool tg_response_is_ok(const char *resp, const char **out_desc)
     return false;
 }
 
+static bool telegram_has_token(void)
+{
+    return s_bot_token[0] != '\0';
+}
+
 static void process_updates(const char *json_str)
 {
     cJSON *root = cJSON_Parse(json_str);
@@ -377,10 +385,9 @@ static void telegram_poll_task(void *arg)
     ESP_LOGI(TAG, "Telegram polling task started");
 
     while (1) {
-        if (s_bot_token[0] == '\0') {
-            ESP_LOGW(TAG, "No bot token configured, waiting...");
-            vTaskDelay(pdMS_TO_TICKS(5000));
-            continue;
+        if (!telegram_has_token()) {
+            ESP_LOGI(TAG, "Telegram polling task stopped: no bot token configured");
+            break;
         }
 
         char params[128];
@@ -397,6 +404,9 @@ static void telegram_poll_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(3000));
         }
     }
+
+    s_poll_task = NULL;
+    vTaskDelete(NULL);
 }
 
 /* --- Public API --- */
@@ -423,7 +433,7 @@ esp_err_t telegram_bot_init(void)
 
     /* s_bot_token is already initialized from MIMI_SECRET_TG_TOKEN as fallback */
 
-    if (s_bot_token[0]) {
+    if (telegram_has_token()) {
         ESP_LOGI(TAG, "Telegram bot token loaded (len=%d)", (int)strlen(s_bot_token));
     } else {
         ESP_LOGW(TAG, "No Telegram bot token. Use CLI: set_tg_token <TOKEN>");
@@ -433,10 +443,20 @@ esp_err_t telegram_bot_init(void)
 
 esp_err_t telegram_bot_start(void)
 {
+    if (!telegram_has_token()) {
+        ESP_LOGI(TAG, "Telegram bot not configured; skipping poll task start");
+        return ESP_OK;
+    }
+
+    if (s_poll_task != NULL) {
+        ESP_LOGI(TAG, "Telegram polling task already running");
+        return ESP_OK;
+    }
+
     BaseType_t ret = xTaskCreatePinnedToCore(
         telegram_poll_task, "tg_poll",
         MIMI_TG_POLL_STACK, NULL,
-        MIMI_TG_POLL_PRIO, NULL, MIMI_TG_POLL_CORE);
+        MIMI_TG_POLL_PRIO, &s_poll_task, MIMI_TG_POLL_CORE);
 
     return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
 }
@@ -559,5 +579,32 @@ esp_err_t telegram_set_token(const char *token)
 
     strncpy(s_bot_token, token, sizeof(s_bot_token) - 1);
     ESP_LOGI(TAG, "Telegram bot token saved");
+
+    if (s_poll_task == NULL) {
+        esp_err_t start_err = telegram_bot_start();
+        if (start_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to auto-start Telegram polling: %s", esp_err_to_name(start_err));
+            return start_err;
+        }
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t telegram_clear_token(void)
+{
+    nvs_handle_t nvs;
+    ESP_ERROR_CHECK(nvs_open(MIMI_NVS_TG, NVS_READWRITE, &nvs));
+    esp_err_t err = nvs_erase_key(nvs, MIMI_NVS_KEY_TG_TOKEN);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        nvs_close(nvs);
+        return err;
+    }
+    ESP_ERROR_CHECK(nvs_commit(nvs));
+    nvs_close(nvs);
+
+    memset(s_bot_token, 0, sizeof(s_bot_token));
+    strncpy(s_bot_token, MIMI_SECRET_TG_TOKEN, sizeof(s_bot_token) - 1);
+    ESP_LOGI(TAG, "Telegram bot token cleared");
     return ESP_OK;
 }

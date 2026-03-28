@@ -5,6 +5,7 @@
 #include "llm/llm_proxy.h"
 #include "memory/session_mgr.h"
 #include "tools/tool_registry.h"
+#include "board_ui.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -191,6 +192,7 @@ static void agent_loop_task(void *arg)
         if (err != ESP_OK) continue;
 
         ESP_LOGI(TAG, "Processing message from %s:%s", msg.channel, msg.chat_id);
+        board_ui_set_phase(BOARD_UI_PHASE_WORKING, "WORKING", msg.channel);
 
         /* 1. Build system prompt */
         context_build_system_prompt(system_prompt, MIMI_CONTEXT_BUF_SIZE);
@@ -239,6 +241,7 @@ static void agent_loop_task(void *arg)
 
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "LLM call failed: %s", esp_err_to_name(err));
+                board_ui_set_phase(BOARD_UI_PHASE_ERROR, "LLM ERROR", esp_err_to_name(err));
                 break;
             }
 
@@ -296,8 +299,10 @@ static void agent_loop_task(void *arg)
             if (message_bus_push_outbound(&out) != ESP_OK) {
                 ESP_LOGW(TAG, "Outbound queue full, drop final response");
                 free(final_text);
+                board_ui_set_phase(BOARD_UI_PHASE_ERROR, "QUEUE FULL", "OUTBOUND");
             } else {
                 final_text = NULL;
+                board_ui_set_phase(BOARD_UI_PHASE_REPLY, "REPLIED", out.channel);
             }
         } else {
             /* Error or empty response */
@@ -306,10 +311,12 @@ static void agent_loop_task(void *arg)
             strncpy(out.channel, msg.channel, sizeof(out.channel) - 1);
             strncpy(out.chat_id, msg.chat_id, sizeof(out.chat_id) - 1);
             out.content = strdup("Sorry, I encountered an error.");
+            board_ui_set_phase(BOARD_UI_PHASE_ERROR, "AGENT ERROR", msg.channel);
             if (out.content) {
                 if (message_bus_push_outbound(&out) != ESP_OK) {
                     ESP_LOGW(TAG, "Outbound queue full, drop error response");
                     free(out.content);
+                    board_ui_set_phase(BOARD_UI_PHASE_ERROR, "QUEUE FULL", "ERROR MSG");
                 }
             }
         }

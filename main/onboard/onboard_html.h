@@ -60,6 +60,8 @@ static const char ONBOARD_HTML[] =
 "<option value='anthropic'>Anthropic</option>"
 "<option value='openai'>OpenAI</option>"
 "</select>"
+"<label>OpenAI URL (optional)</label>"
+"<input id='openai_url' placeholder='https://api.openai.com or https://api.openai.com/v1/chat/completions'>"
 "</div></div>"
 
 /* Telegram section */
@@ -134,7 +136,7 @@ static const char ONBOARD_HTML[] =
 "}).catch(()=>{btn.textContent='Scan WiFi Networks';btn.disabled=false})}"
 
 "function save(){"
-"var fields=['ssid','password','api_key','model','provider','tg_token',"
+"var fields=['ssid','password','api_key','model','provider','openai_url','tg_token',"
 "'feishu_app_id','feishu_app_secret','proxy_host','proxy_port','proxy_type','search_key','tavily_key'];"
 "var data={};"
 "fields.forEach(f=>{data[f]=document.getElementById(f).value.trim()});"

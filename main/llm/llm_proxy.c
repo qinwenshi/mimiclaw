@@ -15,12 +15,23 @@ static const char *TAG = "llm";
 
 #define LLM_API_KEY_MAX_LEN 320
 #define LLM_MODEL_MAX_LEN   64
+#define LLM_URL_MAX_LEN     192
+#define LLM_HOST_MAX_LEN     96
+#define LLM_PATH_MAX_LEN    128
+#define LLM_AUTH_MAX_LEN    112
+#define LLM_OPENAI_CHAT_PATH "/v1/chat/completions"
 #define LLM_DUMP_MAX_BYTES   (16 * 1024)
 #define LLM_DUMP_CHUNK_BYTES 320
 
 static char s_api_key[LLM_API_KEY_MAX_LEN] = {0};
 static char s_model[LLM_MODEL_MAX_LEN] = MIMI_LLM_DEFAULT_MODEL;
 static char s_provider[16] = MIMI_LLM_PROVIDER_DEFAULT;
+static char s_openai_api_url[LLM_URL_MAX_LEN] = {0};
+static char s_openai_host[LLM_HOST_MAX_LEN] = "api.openai.com";
+static char s_openai_path[LLM_PATH_MAX_LEN] = LLM_OPENAI_CHAT_PATH;
+static char s_openai_authority[LLM_AUTH_MAX_LEN] = "api.openai.com";
+static uint16_t s_openai_port = 443;
+static bool s_openai_use_tls = true;
 
 static void llm_log_payload(const char *label, const char *payload)
 {
@@ -79,6 +90,198 @@ static void safe_copy(char *dst, size_t dst_size, const char *src)
     size_t n = strnlen(src, dst_size - 1);
     memcpy(dst, src, n);
     dst[n] = '\0';
+}
+
+static void llm_reset_openai_endpoint(void)
+{
+    s_openai_api_url[0] = '\0';
+    safe_copy(s_openai_host, sizeof(s_openai_host), "api.openai.com");
+    safe_copy(s_openai_path, sizeof(s_openai_path), LLM_OPENAI_CHAT_PATH);
+    safe_copy(s_openai_authority, sizeof(s_openai_authority), "api.openai.com");
+    s_openai_port = 443;
+    s_openai_use_tls = true;
+}
+
+static bool str_has_suffix(const char *text, const char *suffix)
+{
+    size_t text_len;
+    size_t suffix_len;
+
+    if (!text || !suffix) {
+        return false;
+    }
+
+    text_len = strlen(text);
+    suffix_len = strlen(suffix);
+    if (suffix_len > text_len) {
+        return false;
+    }
+
+    return strcmp(text + text_len - suffix_len, suffix) == 0;
+}
+
+static esp_err_t llm_normalize_openai_path(const char *input_path, char *out, size_t out_size)
+{
+    char base[LLM_PATH_MAX_LEN];
+    size_t len;
+
+    if (!out || out_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!input_path || input_path[0] == '\0' || strcmp(input_path, "/") == 0) {
+        safe_copy(out, out_size, LLM_OPENAI_CHAT_PATH);
+        return ESP_OK;
+    }
+
+    if (strstr(input_path, "/responses") != NULL) {
+        ESP_LOGE(TAG, "Responses API is not supported by this OpenAI client: %s", input_path);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    if (strstr(input_path, "/chat/completions") != NULL) {
+        safe_copy(out, out_size, input_path);
+        return ESP_OK;
+    }
+
+    safe_copy(base, sizeof(base), input_path);
+    len = strlen(base);
+    while (len > 1 && base[len - 1] == '/') {
+        base[--len] = '\0';
+    }
+
+    if (str_has_suffix(base, "/v1")) {
+        if (snprintf(out, out_size, "%s/chat/completions", base) >= (int)out_size) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+        return ESP_OK;
+    }
+
+    if (snprintf(out, out_size, "%s%s", base, LLM_OPENAI_CHAT_PATH) >= (int)out_size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t llm_apply_openai_api_url(const char *url)
+{
+    if (!url || url[0] == '\0') {
+        llm_reset_openai_endpoint();
+        return ESP_OK;
+    }
+
+    const char *scheme_end = strstr(url, "://");
+    if (!scheme_end) {
+        ESP_LOGE(TAG, "OpenAI URL missing scheme: %s", url);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    bool use_tls = false;
+    uint16_t default_port = 0;
+    size_t scheme_len = (size_t)(scheme_end - url);
+    if (scheme_len == 5 && strncmp(url, "https", 5) == 0) {
+        use_tls = true;
+        default_port = 443;
+    } else if (scheme_len == 4 && strncmp(url, "http", 4) == 0) {
+        use_tls = false;
+        default_port = 80;
+    } else {
+        ESP_LOGE(TAG, "OpenAI URL scheme must be http or https: %s", url);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const char *host_start = scheme_end + 3;
+    const char *path_start = strchr(host_start, '/');
+    const char *host_end = path_start ? path_start : (url + strlen(url));
+    if (host_start >= host_end) {
+        ESP_LOGE(TAG, "OpenAI URL missing host: %s", url);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const char *port_sep = NULL;
+    for (const char *p = host_start; p < host_end; ++p) {
+        if (*p == ':') {
+            if (port_sep) {
+                ESP_LOGE(TAG, "OpenAI URL host format not supported: %s", url);
+                return ESP_ERR_INVALID_ARG;
+            }
+            port_sep = p;
+        }
+    }
+
+    size_t host_len = port_sep ? (size_t)(port_sep - host_start) : (size_t)(host_end - host_start);
+    if (host_len == 0 || host_len >= sizeof(s_openai_host)) {
+        ESP_LOGE(TAG, "OpenAI URL host too long: %s", url);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char host[LLM_HOST_MAX_LEN];
+    memcpy(host, host_start, host_len);
+    host[host_len] = '\0';
+
+    uint16_t port = default_port;
+    if (port_sep) {
+        const char *port_str = port_sep + 1;
+        if (port_str >= host_end) {
+            ESP_LOGE(TAG, "OpenAI URL has empty port: %s", url);
+            return ESP_ERR_INVALID_ARG;
+        }
+        char port_buf[8];
+        size_t port_len = (size_t)(host_end - port_str);
+        if (port_len == 0 || port_len >= sizeof(port_buf)) {
+            ESP_LOGE(TAG, "OpenAI URL port invalid: %s", url);
+            return ESP_ERR_INVALID_ARG;
+        }
+        memcpy(port_buf, port_str, port_len);
+        port_buf[port_len] = '\0';
+
+        char *end = NULL;
+        unsigned long parsed = strtoul(port_buf, &end, 10);
+        if (!end || *end != '\0' || parsed == 0 || parsed > 65535UL) {
+            ESP_LOGE(TAG, "OpenAI URL port invalid: %s", url);
+            return ESP_ERR_INVALID_ARG;
+        }
+        port = (uint16_t)parsed;
+    }
+
+    const char *path = path_start ? path_start : "/";
+    char normalized_path[LLM_PATH_MAX_LEN];
+    char normalized_url[LLM_URL_MAX_LEN];
+
+    if (strlen(path) >= sizeof(s_openai_path)) {
+        ESP_LOGE(TAG, "OpenAI URL path too long: %s", url);
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t path_err = llm_normalize_openai_path(path, normalized_path, sizeof(normalized_path));
+    if (path_err != ESP_OK) {
+        ESP_LOGE(TAG, "OpenAI URL path is not supported: %s", url);
+        return path_err;
+    }
+
+    char authority[LLM_AUTH_MAX_LEN];
+    if (port == default_port) {
+        safe_copy(authority, sizeof(authority), host);
+    } else {
+        int auth_len = snprintf(authority, sizeof(authority), "%s:%u", host, (unsigned)port);
+        if (auth_len <= 0 || auth_len >= (int)sizeof(authority)) {
+            ESP_LOGE(TAG, "OpenAI URL authority invalid: %s", url);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+
+    if (snprintf(normalized_url, sizeof(normalized_url), "%s://%s%s",
+                 use_tls ? "https" : "http", authority, normalized_path) >= (int)sizeof(normalized_url)) {
+        ESP_LOGE(TAG, "OpenAI URL too long after normalization: %s", url);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    safe_copy(s_openai_api_url, sizeof(s_openai_api_url), normalized_url);
+    safe_copy(s_openai_host, sizeof(s_openai_host), host);
+    safe_copy(s_openai_path, sizeof(s_openai_path), normalized_path);
+    safe_copy(s_openai_authority, sizeof(s_openai_authority), authority);
+    s_openai_port = port;
+    s_openai_use_tls = use_tls;
+    return ESP_OK;
 }
 
 /* ── Response buffer ──────────────────────────────────────────── */
@@ -189,23 +392,43 @@ static bool provider_is_openai(void)
 
 static const char *llm_api_url(void)
 {
-    return provider_is_openai() ? MIMI_OPENAI_API_URL : MIMI_LLM_API_URL;
+    if (provider_is_openai()) {
+        return s_openai_api_url[0] ? s_openai_api_url : MIMI_OPENAI_API_URL;
+    }
+    return MIMI_LLM_API_URL;
 }
 
 static const char *llm_api_host(void)
 {
-    return provider_is_openai() ? "api.openai.com" : "api.anthropic.com";
+    return provider_is_openai() ? s_openai_host : "api.anthropic.com";
 }
 
 static const char *llm_api_path(void)
 {
-    return provider_is_openai() ? "/v1/chat/completions" : "/v1/messages";
+    return provider_is_openai() ? s_openai_path : "/v1/messages";
+}
+
+static const char *llm_api_authority(void)
+{
+    return provider_is_openai() ? s_openai_authority : "api.anthropic.com";
+}
+
+static uint16_t llm_api_port(void)
+{
+    return provider_is_openai() ? s_openai_port : 443;
+}
+
+static bool llm_api_uses_tls(void)
+{
+    return provider_is_openai() ? s_openai_use_tls : true;
 }
 
 /* ── Init ─────────────────────────────────────────────────────── */
 
 esp_err_t llm_proxy_init(void)
 {
+    llm_reset_openai_endpoint();
+
     /* Start with build-time defaults */
     if (MIMI_SECRET_API_KEY[0] != '\0') {
         safe_copy(s_api_key, sizeof(s_api_key), MIMI_SECRET_API_KEY);
@@ -215,6 +438,13 @@ esp_err_t llm_proxy_init(void)
     }
     if (MIMI_SECRET_MODEL_PROVIDER[0] != '\0') {
         safe_copy(s_provider, sizeof(s_provider), MIMI_SECRET_MODEL_PROVIDER);
+    }
+    if (MIMI_SECRET_OPENAI_API_URL[0] != '\0') {
+        esp_err_t err = llm_apply_openai_api_url(MIMI_SECRET_OPENAI_API_URL);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Ignoring invalid build-time OpenAI URL");
+            llm_reset_openai_endpoint();
+        }
     }
 
     /* NVS overrides take highest priority (set via CLI) */
@@ -235,11 +465,27 @@ esp_err_t llm_proxy_init(void)
         if (nvs_get_str(nvs, MIMI_NVS_KEY_PROVIDER, provider_tmp, &len) == ESP_OK && provider_tmp[0]) {
             safe_copy(s_provider, sizeof(s_provider), provider_tmp);
         }
+        char url_tmp[LLM_URL_MAX_LEN] = {0};
+        len = sizeof(url_tmp);
+        if (nvs_get_str(nvs, MIMI_NVS_KEY_OPENAI_API_URL, url_tmp, &len) == ESP_OK && url_tmp[0]) {
+            esp_err_t err = llm_apply_openai_api_url(url_tmp);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Ignoring invalid saved OpenAI URL");
+                if (MIMI_SECRET_OPENAI_API_URL[0] != '\0') {
+                    if (llm_apply_openai_api_url(MIMI_SECRET_OPENAI_API_URL) != ESP_OK) {
+                        llm_reset_openai_endpoint();
+                    }
+                } else {
+                    llm_reset_openai_endpoint();
+                }
+            }
+        }
         nvs_close(nvs);
     }
 
     if (s_api_key[0]) {
-        ESP_LOGI(TAG, "LLM proxy initialized (provider: %s, model: %s)", s_provider, s_model);
+        ESP_LOGI(TAG, "LLM proxy initialized (provider: %s, model: %s, url: %s)",
+                 s_provider, s_model, llm_api_url());
     } else {
         ESP_LOGW(TAG, "No API key. Use CLI: set_api_key <KEY>");
     }
@@ -257,7 +503,8 @@ static esp_err_t llm_http_direct(const char *post_data, resp_buf_t *rb, int *out
         .timeout_ms = 120 * 1000,
         .buffer_size = 4096,
         .buffer_size_tx = 4096,
-        .crt_bundle_attach = esp_crt_bundle_attach,
+        .transport_type = llm_api_uses_tls() ? HTTP_TRANSPORT_OVER_SSL : HTTP_TRANSPORT_OVER_TCP,
+        .crt_bundle_attach = llm_api_uses_tls() ? esp_crt_bundle_attach : NULL,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -287,7 +534,12 @@ static esp_err_t llm_http_direct(const char *post_data, resp_buf_t *rb, int *out
 
 static esp_err_t llm_http_via_proxy(const char *post_data, resp_buf_t *rb, int *out_status)
 {
-    proxy_conn_t *conn = proxy_conn_open(llm_api_host(), 443, 30000);
+    if (!llm_api_uses_tls()) {
+        ESP_LOGE(TAG, "Proxy mode requires https OpenAI URL: %s", llm_api_url());
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    proxy_conn_t *conn = proxy_conn_open(llm_api_host(), llm_api_port(), 30000);
     if (!conn) return ESP_ERR_HTTP_CONNECT;
 
     int body_len = strlen(post_data);
@@ -301,7 +553,7 @@ static esp_err_t llm_http_via_proxy(const char *post_data, resp_buf_t *rb, int *
             "Authorization: Bearer %s\r\n"
             "Content-Length: %d\r\n"
             "Connection: close\r\n\r\n",
-            llm_api_path(), llm_api_host(), s_api_key, body_len);
+            llm_api_path(), llm_api_authority(), s_api_key, body_len);
     } else {
         hlen = snprintf(header, sizeof(header),
             "POST %s HTTP/1.1\r\n"
@@ -311,7 +563,7 @@ static esp_err_t llm_http_via_proxy(const char *post_data, resp_buf_t *rb, int *
             "anthropic-version: %s\r\n"
             "Content-Length: %d\r\n"
             "Connection: close\r\n\r\n",
-            llm_api_path(), llm_api_host(), s_api_key, MIMI_LLM_API_VERSION, body_len);
+            llm_api_path(), llm_api_authority(), s_api_key, MIMI_LLM_API_VERSION, body_len);
     }
 
     if (proxy_conn_write(conn, header, hlen) < 0 ||
@@ -596,8 +848,8 @@ esp_err_t llm_chat_tools(const char *system_prompt,
     cJSON_Delete(body);
     if (!post_data) return ESP_ERR_NO_MEM;
 
-    ESP_LOGI(TAG, "Calling LLM API with tools (provider: %s, model: %s, body: %d bytes)",
-             s_provider, s_model, (int)strlen(post_data));
+    ESP_LOGI(TAG, "Calling LLM API with tools (provider: %s, model: %s, url: %s, body: %d bytes)",
+             s_provider, s_model, llm_api_url(), (int)strlen(post_data));
     llm_log_payload("LLM tools request", post_data);
 
     /* HTTP call */
@@ -621,7 +873,7 @@ esp_err_t llm_chat_tools(const char *system_prompt,
     llm_log_payload("LLM tools raw response", rb.data);
 
     if (status != 200) {
-        ESP_LOGE(TAG, "API error %d: %.500s", status, rb.data ? rb.data : "");
+        ESP_LOGE(TAG, "API error %d from %s: %.500s", status, llm_api_url(), rb.data ? rb.data : "");
         resp_buf_free(&rb);
         return ESP_FAIL;
     }
@@ -807,5 +1059,35 @@ esp_err_t llm_set_provider(const char *provider)
 
     safe_copy(s_provider, sizeof(s_provider), provider);
     ESP_LOGI(TAG, "Provider set to: %s", s_provider);
+    return ESP_OK;
+}
+
+esp_err_t llm_set_openai_api_url(const char *url)
+{
+    const char *value = url ? url : "";
+    esp_err_t err = llm_apply_openai_api_url(value);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    nvs_handle_t nvs;
+    ESP_ERROR_CHECK(nvs_open(MIMI_NVS_LLM, NVS_READWRITE, &nvs));
+    if (value[0] == '\0') {
+        esp_err_t erase_err = nvs_erase_key(nvs, MIMI_NVS_KEY_OPENAI_API_URL);
+        if (erase_err != ESP_OK && erase_err != ESP_ERR_NVS_NOT_FOUND) {
+            nvs_close(nvs);
+            return erase_err;
+        }
+    } else {
+        ESP_ERROR_CHECK(nvs_set_str(nvs, MIMI_NVS_KEY_OPENAI_API_URL, value));
+    }
+    ESP_ERROR_CHECK(nvs_commit(nvs));
+    nvs_close(nvs);
+
+    if (value[0]) {
+        ESP_LOGI(TAG, "OpenAI URL set to: %s", s_openai_api_url);
+    } else {
+        ESP_LOGI(TAG, "OpenAI URL cleared; using default: %s", MIMI_OPENAI_API_URL);
+    }
     return ESP_OK;
 }

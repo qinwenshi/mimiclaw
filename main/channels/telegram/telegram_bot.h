@@ -25,3 +25,7 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text);
  */
 esp_err_t telegram_set_token(const char *token);
 
+/**
+ * Clear the Telegram bot token override from NVS and restore the build-time fallback.
+ */
+esp_err_t telegram_clear_token(void);

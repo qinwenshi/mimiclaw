@@ -27,6 +27,11 @@ esp_err_t llm_set_provider(const char *provider);
  */
 esp_err_t llm_set_model(const char *model);
 
+/**
+ * Save a custom OpenAI-compatible URL to NVS. Empty string clears the override.
+ */
+esp_err_t llm_set_openai_api_url(const char *url);
+
 /* ── Tool Use Support ──────────────────────────────────────────── */
 
 typedef struct {

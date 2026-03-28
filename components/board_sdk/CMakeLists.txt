@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS
+        "libs/lcd_st7789.c"
+        "libs/led_ws2812.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        esp_lcd
+        esp_adc
+        esp_driver_gpio
+        esp_driver_ledc
+        esp_driver_spi
+        led_strip
+)

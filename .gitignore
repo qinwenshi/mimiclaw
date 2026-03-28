@@ -1,5 +1,6 @@
 # Build output
 build/
+build-*/
 dist/
 tmp/
 releases/
@@ -8,7 +9,9 @@ releases/
 sdkconfig
 sdkconfig.old
 dependencies.lock
-components/
+components/*
+!components/board_sdk/
+!components/board_sdk/**
 managed_components/
 
 # Generated headers

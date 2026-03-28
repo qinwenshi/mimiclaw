@@ -25,6 +25,8 @@ static const char *TAG = "feishu";
 #define FEISHU_SEND_MSG_URL     FEISHU_API_BASE "/im/v1/messages"
 #define FEISHU_REPLY_MSG_URL    FEISHU_API_BASE "/im/v1/messages/%s/reply"
 #define FEISHU_WS_CONFIG_URL    "https://open.feishu.cn/callback/ws/endpoint"
+#define FEISHU_WS_CONNECT_TIMEOUT_MS 15000
+#define FEISHU_WS_RETRY_DELAY_MS      3000
 
 /* ── Credentials & token state ─────────────────────────────── */
 static char s_app_id[64] = MIMI_SECRET_FEISHU_APP_ID;
@@ -619,7 +621,7 @@ static void feishu_ws_task(void *arg)
             .task_stack = MIMI_FEISHU_POLL_STACK,
             .reconnect_timeout_ms = s_ws_reconnect_interval_ms,
             .network_timeout_ms = 10000,
-            .disable_auto_reconnect = false,
+            .disable_auto_reconnect = true,
             .crt_bundle_attach = esp_crt_bundle_attach,
         };
 
@@ -632,9 +634,12 @@ static void feishu_ws_task(void *arg)
         esp_websocket_client_start(s_ws_client);
 
         int64_t last_ping = 0;
+        int64_t connect_deadline = (esp_timer_get_time() / 1000) + FEISHU_WS_CONNECT_TIMEOUT_MS;
+        bool seen_connected = false;
         while (s_ws_client) {
+            int64_t now = esp_timer_get_time() / 1000;
             if (s_ws_connected) {
-                int64_t now = esp_timer_get_time() / 1000;
+                seen_connected = true;
                 if (now - last_ping >= s_ws_ping_interval_ms) {
                     ws_frame_t ping = {0};
                     ping.seq_id = 0;
@@ -647,8 +652,13 @@ static void feishu_ws_task(void *arg)
                     ws_send_frame(&ping, NULL, 0, 1000);
                     last_ping = now;
                 }
-            }
-            if (!esp_websocket_client_is_connected(s_ws_client) && !s_ws_connected) {
+            } else if (!seen_connected) {
+                if (now >= connect_deadline) {
+                    ESP_LOGW(TAG, "Feishu WS connect timeout; recreating client");
+                    break;
+                }
+            } else if (!esp_websocket_client_is_connected(s_ws_client)) {
+                ESP_LOGW(TAG, "Feishu WS link dropped; recreating client");
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(200));
@@ -658,7 +668,7 @@ static void feishu_ws_task(void *arg)
         esp_websocket_client_destroy(s_ws_client);
         s_ws_client = NULL;
         s_ws_connected = false;
-        vTaskDelay(pdMS_TO_TICKS(3000));
+        vTaskDelay(pdMS_TO_TICKS(FEISHU_WS_RETRY_DELAY_MS));
     }
 }
 
