@@ -33,6 +33,21 @@ MimiClaw turns a tiny ESP32-S3 board into a personal AI assistant. Plug it into 
 
 You send a message on Telegram. The ESP32-S3 picks it up over WiFi, feeds it into an agent loop — the LLM thinks, calls tools, reads memory — and sends the reply back. Supports both **Anthropic (Claude)** and **OpenAI (GPT)** as providers, switchable at runtime. Everything runs on a single $5 chip with all your data stored locally on flash.
 
+## Demo on esp32-1.54
+
+<p align="center">
+  <img src="assets/esp32s3-lcd-1.54.png" alt="MimiClaw running on esp32-1.54 with the local LCD UI" width="360" />
+</p>
+
+This is the current on-device UI running on `esp32-1.54`. The screen now prioritizes the latest reply, keeps a prompt preview strip, and exposes WiFi/IP/power state locally.
+
+## Recent esp32-1.54 Changes
+
+- Added direct `esp32-1.54` board support: 240x240 LCD, WS2812 status LED, battery/USB sensing, buttons, and native USB Serial/JTAG for flashing and CLI.
+- Refreshed the local UI to be reply-first, with a larger message area, a dedicated prompt preview strip, and local status cards for WiFi/IP/power.
+- Added on-device UTF-8 Chinese rendering with improved glyph coverage, plus safer glyph lookup and clipped prompt marquee rendering.
+- Expanded OTA app slots to `3 MB` to make room for the larger bundled Chinese font. After this change, do a full flash instead of an app-only flash.
+
 ## Quick Start
 
 ### What You Need

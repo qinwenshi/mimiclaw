@@ -33,6 +33,21 @@ MimiClaw 把一块小小的 ESP32-S3 开发板变成你的私人 AI 助理。插
 
 你在 Telegram 发一条消息，ESP32-S3 通过 WiFi 收到后送进 Agent 循环 — LLM 思考、调用工具、读取记忆 — 再把回复发回来。同时支持 **Anthropic (Claude)** 和 **OpenAI (GPT)** 两种提供商，运行时可切换。一切都跑在一颗 $5 的芯片上，所有数据存在本地 Flash。
 
+## esp32-1.54 Demo
+
+<p align="center">
+  <img src="assets/esp32s3-lcd-1.54.png" alt="MimiClaw 在 esp32-1.54 上运行的本地 LCD 界面" width="360" />
+</p>
+
+上图是当前 `esp32-1.54` 实机上的本地界面。屏幕现在会优先展示最近一次回复，同时保留一条 `PROMPT` 预览，并在本地显示 WiFi/IP/电源状态。
+
+## 最近变更
+
+- 直接适配 `esp32-1.54`：启用 240x240 LCD、WS2812 状态灯、电池/USB 检测、板载按键，以及原生 USB Serial/JTAG 烧录和 CLI。
+- 重做了本地 UI，改成“回复优先”的布局：更大的正文区、一条独立的 `PROMPT` 预览，以及本地 WiFi/IP/电源状态信息。
+- 增加了设备端 UTF-8 中文渲染，补了更完整的中文字库，并修了缺字查表越界和 `PROMPT` 横向滚动越界覆盖 label 的问题。
+- OTA app 分区已扩到 `3 MB`，给更大的中文字库留空间。这个版本开始建议做一次完整烧录，不要只刷 app。
+
 ## 快速开始
 
 ### 你需要
