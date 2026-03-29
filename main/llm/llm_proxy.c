@@ -390,6 +390,11 @@ static bool provider_is_openai(void)
     return strcmp(s_provider, "openai") == 0;
 }
 
+static bool openai_uses_compat_chat_params(void)
+{
+    return provider_is_openai() && strcmp(s_openai_host, "api.openai.com") != 0;
+}
+
 static const char *llm_api_url(void)
 {
     if (provider_is_openai()) {
@@ -812,7 +817,11 @@ esp_err_t llm_chat_tools(const char *system_prompt,
     cJSON *body = cJSON_CreateObject();
     cJSON_AddStringToObject(body, "model", s_model);
     if (provider_is_openai()) {
-        cJSON_AddNumberToObject(body, "max_completion_tokens", MIMI_LLM_MAX_TOKENS);
+        if (openai_uses_compat_chat_params()) {
+            cJSON_AddNumberToObject(body, "max_tokens", MIMI_LLM_MAX_TOKENS);
+        } else {
+            cJSON_AddNumberToObject(body, "max_completion_tokens", MIMI_LLM_MAX_TOKENS);
+        }
     } else {
         cJSON_AddNumberToObject(body, "max_tokens", MIMI_LLM_MAX_TOKENS);
     }

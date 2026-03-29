@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <ctype.h>
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "freertos/timers.h"
 #include "esp_log.h"
 
@@ -18,6 +19,7 @@ static const char *TAG = "heartbeat";
     "If nothing needs attention, reply with just: HEARTBEAT_OK"
 
 static TimerHandle_t s_heartbeat_timer = NULL;
+static TaskHandle_t s_heartbeat_task = NULL;
 
 /* ── Content check ────────────────────────────────────────────── */
 
@@ -108,7 +110,19 @@ static bool heartbeat_send(void)
 static void heartbeat_timer_callback(TimerHandle_t xTimer)
 {
     (void)xTimer;
-    heartbeat_send();
+    if (s_heartbeat_task) {
+        xTaskNotifyGive(s_heartbeat_task);
+    }
+}
+
+static void heartbeat_task(void *arg)
+{
+    (void)arg;
+
+    while (1) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        heartbeat_send();
+    }
 }
 
 /* ── Public API ───────────────────────────────────────────────── */
@@ -122,6 +136,23 @@ esp_err_t heartbeat_init(void)
 
 esp_err_t heartbeat_start(void)
 {
+    if (!s_heartbeat_task) {
+        BaseType_t ok = xTaskCreatePinnedToCore(
+            heartbeat_task,
+            "heartbeat",
+            MIMI_HEARTBEAT_TASK_STACK,
+            NULL,
+            MIMI_HEARTBEAT_TASK_PRIO,
+            &s_heartbeat_task,
+            MIMI_HEARTBEAT_TASK_CORE
+        );
+        if (ok != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create heartbeat worker task");
+            s_heartbeat_task = NULL;
+            return ESP_FAIL;
+        }
+    }
+
     if (s_heartbeat_timer) {
         ESP_LOGW(TAG, "Heartbeat timer already running");
         return ESP_OK;
@@ -156,6 +187,11 @@ void heartbeat_stop(void)
         xTimerDelete(s_heartbeat_timer, pdMS_TO_TICKS(1000));
         s_heartbeat_timer = NULL;
         ESP_LOGI(TAG, "Heartbeat stopped");
+    }
+
+    if (s_heartbeat_task) {
+        vTaskDelete(s_heartbeat_task);
+        s_heartbeat_task = NULL;
     }
 }
 
