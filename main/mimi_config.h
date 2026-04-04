@@ -84,6 +84,8 @@
 
 /* Timezone (POSIX TZ format) */
 #define MIMI_TIMEZONE                "PST8PDT,M3.2.0,M11.1.0"
+#define MIMI_NTP_SERVER              "ntp.aliyun.com"
+#define MIMI_NTP_SYNC_TIMEOUT_MS     (10 * 1000)
 
 /* LLM */
 #define MIMI_LLM_DEFAULT_MODEL       "claude-opus-4-5"

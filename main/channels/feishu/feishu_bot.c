@@ -27,6 +27,7 @@ static const char *TAG = "feishu";
 #define FEISHU_WS_CONFIG_URL    "https://open.feishu.cn/callback/ws/endpoint"
 #define FEISHU_WS_CONNECT_TIMEOUT_MS 15000
 #define FEISHU_WS_RETRY_DELAY_MS      3000
+#define FEISHU_WS_MAX_SESSION_MS  (60 * 60 * 1000)
 
 /* ── Credentials & token state ─────────────────────────────── */
 static char s_app_id[64] = MIMI_SECRET_FEISHU_APP_ID;
@@ -42,7 +43,8 @@ static int s_ws_ping_interval_ms = 120000;
 static int s_ws_reconnect_interval_ms = 30000;
 static int s_ws_reconnect_nonce_ms = 30000;
 static int s_ws_service_id = 0;
-static bool s_ws_connected = false;
+static volatile bool s_ws_connected = false;
+static volatile bool s_ws_restart_requested = false;
 
 static void handle_message_event(cJSON *event);
 
@@ -522,6 +524,23 @@ static esp_err_t feishu_pull_ws_config(void)
     return ESP_OK;
 }
 
+static int64_t feishu_ws_refresh_deadline_ms(int64_t now_ms)
+{
+    int64_t deadline = now_ms + FEISHU_WS_MAX_SESSION_MS;
+
+    /* If we already have a tenant token expiry cached, rotate the WS session
+     * before that window too. This avoids keeping a long connection around
+     * with stale auth/session state. */
+    if (s_token_expire_time > 0) {
+        int64_t token_deadline_ms = s_token_expire_time * 1000LL;
+        if (token_deadline_ms > now_ms && token_deadline_ms < deadline) {
+            deadline = token_deadline_ms;
+        }
+    }
+
+    return deadline;
+}
+
 static void feishu_process_ws_event_json(const char *json, size_t len)
 {
     cJSON *root = cJSON_ParseWithLength(json, len);
@@ -581,10 +600,24 @@ static void feishu_ws_event_handler(void *arg, esp_event_base_t base, int32_t ev
     static size_t rx_cap = 0;
     if (event_id == WEBSOCKET_EVENT_CONNECTED) {
         s_ws_connected = true;
+        s_ws_restart_requested = false;
         ESP_LOGI(TAG, "Feishu WS connected");
+    } else if (event_id == WEBSOCKET_EVENT_ERROR) {
+        s_ws_connected = false;
+        s_ws_restart_requested = true;
+        ESP_LOGW(TAG, "Feishu WS error: type=%d http=%d errno=%d esp_err=0x%x",
+                 e->error_handle.error_type,
+                 e->error_handle.esp_ws_handshake_status_code,
+                 e->error_handle.esp_transport_sock_errno,
+                 (unsigned)e->error_handle.esp_tls_last_esp_err);
     } else if (event_id == WEBSOCKET_EVENT_DISCONNECTED) {
         s_ws_connected = false;
+        s_ws_restart_requested = true;
         ESP_LOGW(TAG, "Feishu WS disconnected");
+    } else if (event_id == WEBSOCKET_EVENT_CLOSED) {
+        s_ws_connected = false;
+        s_ws_restart_requested = true;
+        ESP_LOGW(TAG, "Feishu WS closed");
     } else if (event_id == WEBSOCKET_EVENT_DATA) {
         if (e->op_code != WS_TRANSPORT_OPCODES_BINARY) return;
         size_t need = e->payload_offset + e->data_len;
@@ -615,6 +648,14 @@ static void feishu_ws_task(void *arg)
             continue;
         }
 
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        int64_t refresh_deadline_ms = feishu_ws_refresh_deadline_ms(now_ms);
+        ESP_LOGI(TAG, "Feishu WS session refresh in %llds",
+                 (long long)((refresh_deadline_ms - now_ms) / 1000));
+
+        s_ws_connected = false;
+        s_ws_restart_requested = false;
+
         esp_websocket_client_config_t ws_cfg = {
             .uri = s_ws_url,
             .buffer_size = 2048,
@@ -636,10 +677,27 @@ static void feishu_ws_task(void *arg)
         int64_t last_ping = 0;
         int64_t connect_deadline = (esp_timer_get_time() / 1000) + FEISHU_WS_CONNECT_TIMEOUT_MS;
         bool seen_connected = false;
+        const char *restart_reason = NULL;
         while (s_ws_client) {
             int64_t now = esp_timer_get_time() / 1000;
+            if (s_ws_restart_requested) {
+                restart_reason = "event signaled disconnect";
+                break;
+            }
+
             if (s_ws_connected) {
-                seen_connected = true;
+                if (!seen_connected) {
+                    seen_connected = true;
+                    last_ping = now;
+                }
+                if (!esp_websocket_client_is_connected(s_ws_client)) {
+                    restart_reason = "transport dropped without disconnect event";
+                    break;
+                }
+                if (now >= refresh_deadline_ms) {
+                    restart_reason = "session refresh due";
+                    break;
+                }
                 if (now - last_ping >= s_ws_ping_interval_ms) {
                     ws_frame_t ping = {0};
                     ping.seq_id = 0;
@@ -649,25 +707,33 @@ static void feishu_ws_task(void *arg)
                     ping.header_count = 1;
                     strncpy(ping.headers[0].key, "type", sizeof(ping.headers[0].key) - 1);
                     strncpy(ping.headers[0].value, "ping", sizeof(ping.headers[0].value) - 1);
-                    ws_send_frame(&ping, NULL, 0, 1000);
+                    if (ws_send_frame(&ping, NULL, 0, 1000) < 0) {
+                        restart_reason = "ping send failed";
+                        break;
+                    }
                     last_ping = now;
                 }
             } else if (!seen_connected) {
                 if (now >= connect_deadline) {
-                    ESP_LOGW(TAG, "Feishu WS connect timeout; recreating client");
+                    restart_reason = "connect timeout";
                     break;
                 }
             } else if (!esp_websocket_client_is_connected(s_ws_client)) {
-                ESP_LOGW(TAG, "Feishu WS link dropped; recreating client");
+                restart_reason = "link dropped";
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(200));
+        }
+
+        if (restart_reason) {
+            ESP_LOGW(TAG, "Feishu WS %s; recreating client", restart_reason);
         }
 
         esp_websocket_client_stop(s_ws_client);
         esp_websocket_client_destroy(s_ws_client);
         s_ws_client = NULL;
         s_ws_connected = false;
+        s_ws_restart_requested = false;
         vTaskDelay(pdMS_TO_TICKS(FEISHU_WS_RETRY_DELAY_MS));
     }
 }

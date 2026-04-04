@@ -255,7 +255,7 @@ MimiClawはAnthropicとOpenAI両方のツール呼び出しをサポート — L
 | ツール | 説明 |
 |--------|------|
 | `web_search` | Tavily（優先）またはBraveでウェブ検索し、最新情報を取得 |
-| `get_current_time` | HTTP経由で現在の日時を取得し、システムクロックを設定 |
+| `get_current_time` | SNTP（`ntp.aliyun.com`）で現在時刻を同期し、システムクロックを設定 |
 | `cron_add` | 定期または単発タスクをスケジュール（LLMが自律的にcronジョブを作成） |
 | `cron_list` | スケジュール済みのcronジョブを一覧表示 |
 | `cron_remove` | IDでcronジョブを削除 |

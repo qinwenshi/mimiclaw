@@ -254,7 +254,7 @@ MimiClaw supports tool calling for both Anthropic and OpenAI — the LLM can cal
 | Tool | Description |
 |------|-------------|
 | `web_search` | Search the web via Tavily (preferred) or Brave for current information |
-| `get_current_time` | Fetch current date/time via HTTP and set the system clock |
+| `get_current_time` | Sync current date/time via SNTP (`ntp.aliyun.com`) and set the system clock |
 | `cron_add` | Schedule a recurring or one-shot task (the LLM creates cron jobs on its own) |
 | `cron_list` | List all scheduled cron jobs |
 | `cron_remove` | Remove a cron job by ID |

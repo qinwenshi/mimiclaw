@@ -269,7 +269,7 @@ MimiClaw 同时支持 Anthropic 和 OpenAI 的工具调用 — LLM 在对话中�
 | 工具 | 说明 |
 |------|------|
 | `web_search` | 通过 Tavily（优先）或 Brave 搜索网页，获取实时信息 |
-| `get_current_time` | 通过 HTTP 获取当前日期和时间，并设置系统时钟 |
+| `get_current_time` | 通过 SNTP（`ntp.aliyun.com`）同步当前日期和时间，并设置系统时钟 |
 | `cron_add` | 创建定时或一次性任务（LLM 自主创建 cron 任务） |
 | `cron_list` | 列出所有已调度的 cron 任务 |
 | `cron_remove` | 按 ID 删除 cron 任务 |
